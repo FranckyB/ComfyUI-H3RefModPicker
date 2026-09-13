@@ -3,6 +3,8 @@ import { api } from "../../scripts/api.js";
 
 const PLACEHOLDER_IMAGE_PATH = new URL("./placeholder.png", import.meta.url).href;
 const DEFAULT_PICKER_NODE_SIZE = [240, 480];
+const MIN_PICKER_NODE_WIDTH = 200;
+const PREVIEW_PANEL_OVERLAP_PX = 8;
 
 function isTypingTarget(target) {
     if (!target) return false;
@@ -56,6 +58,58 @@ function hideWidget(widget) {
     if (widget.inputEl) widget.inputEl.style.display = "none";
 }
 
+function setDynamicWidgetVisible(widget, visible) {
+    if (!widget) return;
+    if (!widget._vrpVisibilityWrapped) {
+        widget._vrpVisibilityWrapped = true;
+        widget._vrpBaseComputeSize = widget.computeSize;
+        widget.computeSize = function (...args) {
+            if (widget._vrpHidden) {
+                return [0, -4];
+            }
+            if (typeof widget._vrpBaseComputeSize === "function") {
+                return widget._vrpBaseComputeSize.apply(this, args);
+            }
+            return [MIN_PICKER_NODE_WIDTH, Number(LiteGraph?.NODE_WIDGET_HEIGHT || 24)];
+        };
+    }
+    if (typeof widget._vrpOriginalDisplay === "undefined" && widget.inputEl) {
+        widget._vrpOriginalDisplay = widget.inputEl.style.display;
+    }
+    widget._vrpHidden = !visible;
+    widget.hidden = !visible;
+    if (widget.inputEl) {
+        widget.inputEl.style.display = visible ? (widget._vrpOriginalDisplay || "") : "none";
+    }
+}
+
+function refreshPickerLayout(node) {
+    if (Array.isArray(node.size) && node.size[0] < MIN_PICKER_NODE_WIDTH) {
+        node.size[0] = MIN_PICKER_NODE_WIDTH;
+    }
+    node.setDirtyCanvas(true, true);
+    app.graph?.setDirtyCanvas(true, true);
+}
+
+function estimatePreviewHeight(node, domWidget) {
+    const nodeHeight = Math.max(Number(node?.size?.[1]) || DEFAULT_PICKER_NODE_SIZE[1], 320);
+    const titleHeight = Number(LiteGraph?.NODE_TITLE_HEIGHT || 30);
+    const topBottomPadding = 16;
+    const widgets = Array.isArray(node?.widgets) ? node.widgets : [];
+    let occupied = 0;
+    for (const widget of widgets) {
+        if (!widget || widget === domWidget) continue;
+        const size = typeof widget.computeSize === "function"
+            ? widget.computeSize(node.size?.[0] || MIN_PICKER_NODE_WIDTH)
+            : null;
+        const height = Array.isArray(size) ? Number(size[1]) || 0 : 0;
+        if (height > 0) {
+            occupied += height;
+        }
+    }
+    return Math.max(120, nodeHeight - titleHeight - topBottomPadding - occupied);
+}
+
 function basenameForDisplay(value) {
     const normalized = String(value || "").replace(/\\/g, "/");
     const i = normalized.lastIndexOf("/");
@@ -80,6 +134,20 @@ function normalizeSelectedModPath(value) {
 function buildPreviewUrl(path) {
     if (!path) return PLACEHOLDER_IMAGE_PATH;
     return api.apiURL(`/h3refmods/refmod-browser/file?path=${encodeURIComponent(path)}`);
+}
+
+function entryHasVisual(entry) {
+    if (!entry) return true;
+    if (entry.paired_split) return true;
+    if (typeof entry.has_visual === "boolean") return entry.has_visual;
+    return entry.kind !== "audio";
+}
+
+function entryHasAudio(entry) {
+    if (!entry) return true;
+    if (entry.paired_split) return true;
+    if (typeof entry.has_audio === "boolean") return entry.has_audio;
+    return entry.kind === "audio";
 }
 
 function installPreviewFallback(img) {
@@ -530,7 +598,7 @@ app.registerExtension({
                 width: 100%;
                 height: 100%;
                 box-sizing: border-box;
-                gap: 6px;
+                gap: 2px;
                 overflow: hidden;
                 background: transparent;
             `;
@@ -549,7 +617,7 @@ app.registerExtension({
                 display: flex;
                 align-items: center;
                 justify-content: center;
-                padding: 4px;
+                padding: 2px 4px 4px;
             `;
 
             const portraitFrame = document.createElement("div");
@@ -637,7 +705,7 @@ app.registerExtension({
                 serialize: false,
                 hideOnZoom: false,
             });
-            domWidget.getHeight = () => "100%";
+            domWidget.getHeight = () => estimatePreviewHeight(node, domWidget);
 
             const strengthWidgetIndex = node.widgets.indexOf(strengthWidget);
             const audioStrengthWidgetIndex = node.widgets.indexOf(audioStrengthWidget);
@@ -715,6 +783,33 @@ app.registerExtension({
             if (audioStrengthWidget) hideWidget(audioStrengthWidget);
             if (modPathWidget) hideWidget(modPathWidget);
 
+            const applyModalityVisibility = (entry) => {
+                const hasVisual = entryHasVisual(entry);
+                const hasAudio = entryHasAudio(entry);
+                setDynamicWidgetVisible(numericStrengthWidget, hasVisual);
+                setDynamicWidgetVisible(numericAudioStrengthWidget, hasAudio);
+                node.properties._vrpHasVisual = hasVisual;
+                node.properties._vrpHasAudio = hasAudio;
+                refreshPickerLayout(node);
+            };
+
+            const storedPreviewEntry = (path) => {
+                if (!path) return null;
+                return {
+                    path,
+                    preview_path: node.properties?._vrpPreviewPath || "",
+                    paired_split: Boolean(node.properties?._vrpPairedSplit),
+                    has_visual: typeof node.properties?._vrpHasVisual === "boolean"
+                        ? node.properties._vrpHasVisual
+                        : true,
+                    has_audio: typeof node.properties?._vrpHasAudio === "boolean"
+                        ? node.properties._vrpHasAudio
+                        : true,
+                };
+            };
+
+            applyModalityVisibility(null);
+
             let filePickerWidget = node.addWidget(
                 "combo",
                 "mod",
@@ -761,9 +856,18 @@ app.registerExtension({
             installVrpArrowNavigation();
 
             const loadPreview = async (entry) => {
+                applyModalityVisibility(entry);
                 if (!entry || !entry.path) {
+                    emptyLabel.textContent = "No RefMod selected";
                     img.removeAttribute("src");
                     img.style.display = "none";
+                    emptyLabel.style.display = "flex";
+                    return;
+                }
+                if (!entryHasVisual(entry)) {
+                    emptyLabel.textContent = "Audio-only RefMod";
+                    img.style.display = "block";
+                    img.src = PLACEHOLDER_IMAGE_PATH;
                     emptyLabel.style.display = "flex";
                     return;
                 }
@@ -781,6 +885,9 @@ app.registerExtension({
                 node.properties._vrpModPath = value;
                 node.properties._vrpModDir = selected?.path ? dirnameForPath(selected.path) : (node.properties._vrpModDir || "");
                 node.properties._vrpPreviewPath = selected?.preview_path || "";
+                node.properties._vrpPairedSplit = Boolean(selected?.paired_split);
+                node.properties._vrpHasVisual = selected ? entryHasVisual(selected) : true;
+                node.properties._vrpHasAudio = selected ? entryHasAudio(selected) : true;
                 void loadPreview(selected);
                 node.setDirtyCanvas(true, true);
             };
@@ -949,9 +1056,12 @@ app.registerExtension({
                 panel.style.setProperty("width", (n.size[0] - 18) + "px", "important");
                 panel.style.setProperty("left", "0px", "important");
                 panel.style.setProperty("margin", "0px", "important");
-                panel.style.setProperty("padding", "4px", "important");
+                panel.style.setProperty("padding", "0 4px 4px", "important");
+                panel.style.setProperty("height", `calc(100% + ${PREVIEW_PANEL_OVERLAP_PX}px)`, "important");
+                panel.style.setProperty("transform", `translateY(-${PREVIEW_PANEL_OVERLAP_PX}px)`, "important");
+                panel.style.setProperty("transform-origin", "top left", "important");
                 panel.style.setProperty("box-sizing", "border-box", "important");
-                panel.style.setProperty("overflow", "hidden", "important");
+                panel.style.setProperty("overflow", "visible", "important");
             };
 
             const onConfigure = node.onConfigure;
@@ -999,7 +1109,7 @@ app.registerExtension({
                 if (restoredEntry) {
                     setSelection(restoredEntry);
                 } else {
-                    void loadPreview(restoredPath ? { path: restoredPath, preview_path: node.properties?._vrpPreviewPath || "" } : null);
+                    void loadPreview(storedPreviewEntry(restoredPath));
                 }
                 return res;
             };
@@ -1023,7 +1133,7 @@ app.registerExtension({
                 if (initialEntry) {
                     setSelection(initialEntry);
                 } else {
-                    void loadPreview(initialPath ? { path: initialPath, preview_path: node.properties?._vrpPreviewPath || "" } : null);
+                    void loadPreview(storedPreviewEntry(initialPath));
                 }
                 if (!node.properties?._configuredFromWorkflow) {
                     node.setSize([...DEFAULT_PICKER_NODE_SIZE]);

@@ -33,6 +33,7 @@ from ..py.refmod_core import (
     optimize_latent,
     optimize_latent_multi,
     pool_latent,
+    save_refmod_bundle,
 )
 from ..py.refmod_vae_loader import load_h3_vaes_from_av_encoder
 # reuse the encode helpers shared with the loader/mods-listing side of the pack
@@ -45,8 +46,8 @@ from .refmod_loader import (
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".aac", ".m4a", ".ogg", ".opus"}
 THUMB_TARGET_ASPECT = 3.0 / 4.0
 THUMB_ASPECT_TOLERANCE = 0.05
-VISUAL_SUFFIX = "_Video"
-AUDIO_SUFFIX = "_Audio"
+VISUAL_SUFFIX = "_visual"
+AUDIO_SUFFIX = "_audio"
 
 
 def _resize_ref(image, short_edge: int, canvas=None):
@@ -334,7 +335,7 @@ def _base_refmod_name(name: str) -> str:
     base = _sanitize_name(name)
     lower_base = base.lower()
     for suffix in (VISUAL_SUFFIX, AUDIO_SUFFIX):
-        if lower_base.endswith(suffix.lower()):
+        if lower_base.endswith(suffix):
             base = base[:-len(suffix)]
             lower_base = base.lower()
     return base or _sanitize_name(name)
@@ -357,6 +358,18 @@ def _unique_split_mod_paths(out_dir: str, base_name: str, include_audio: bool) -
         audio_exists = os.path.isfile(audio_path + ".safetensors")
         if not visual_exists and not audio_exists:
             return candidate, visual_name, visual_path, audio_name, audio_path
+        attempt += 1
+        candidate = f"{root}_{attempt}"
+
+
+def _unique_bundle_mod_path(out_dir: str, base_name: str) -> Tuple[str, str]:
+    root = _base_refmod_name(base_name)
+    candidate = root
+    attempt = 1
+    while True:
+        bundle_path = os.path.join(out_dir, candidate)
+        if not os.path.isfile(bundle_path + ".safetensors"):
+            return candidate, bundle_path
         attempt += 1
         candidate = f"{root}_{attempt}"
 
@@ -612,14 +625,17 @@ def _create_mod_from_folder(
     description: str = "",
     subfolder: str = "",
     save: bool = True,
+    save_layout: str = "bundle",
     budget_policy: str = "truncate",
     merge: bool = False,
     motion_only: bool = False,
     extraction_preset: str = "manual",
 ) -> List[Tuple[H3RefMod, float]]:
-    """Create (and optionally save) one visual RefMod and an optional paired audio RefMod."""
+    """Create refs from one folder and optionally save them as split files or one bundle."""
     if budget_policy not in ("truncate", "error"):
         raise ValueError("Unknown visual token budget policy.")
+    if save_layout not in ("bundle", "separate_files"):
+        raise ValueError("Unknown save layout.")
     if audio_budget_policy not in ("error", "truncate"):
         raise ValueError("Unknown audio token budget policy.")
     if not math.isfinite(audio_max_seconds) or audio_max_seconds <= 0:
@@ -840,7 +856,9 @@ def _create_mod_from_folder(
 
     out_dir = _resolve_output_dir(subfolder)
     requested_base = _base_refmod_name(name)
-    if save:
+    bundle_name = resolved_base = requested_base
+    bundle_path_no_ext = os.path.join(out_dir, requested_base)
+    if save and save_layout == "separate_files":
         resolved_base, visual_name, visual_path_no_ext, audio_name, audio_path_no_ext = _unique_split_mod_paths(
             out_dir, requested_base, include_audio)
         if resolved_base != requested_base:
@@ -848,6 +866,15 @@ def _create_mod_from_folder(
                   f"saving as '{resolved_base}{VISUAL_SUFFIX}'"
                   + (f" and '{resolved_base}{AUDIO_SUFFIX}'" if include_audio else "")
                   + " instead (existing mods are never overwritten).")
+    elif save:
+        bundle_name, bundle_path_no_ext = _unique_bundle_mod_path(out_dir, requested_base)
+        resolved_base = bundle_name
+        if bundle_name != requested_base:
+            print(f"[H3RefModCreateFromFolder] '{requested_base}' already exists in {out_dir} — "
+                  f"saving as '{bundle_name}' instead (existing mods are never overwritten).")
+        visual_name, audio_name = _paired_refmod_names(bundle_name)
+        visual_path_no_ext = os.path.join(out_dir, visual_name)
+        audio_path_no_ext = os.path.join(out_dir, audio_name)
     else:
         resolved_base = requested_base
         visual_name, audio_name = _paired_refmod_names(resolved_base)
@@ -889,16 +916,23 @@ def _create_mod_from_folder(
         rows.append((audio_mod, 1.0))
     total_tokens = _check_total_token_budget(rows, max_total_tokens)
     if save:
-        if visual_mod is not None:
-            visual_path = visual_mod.save(visual_path_no_ext)
-            _copy_refmod_thumbnail(images, visual_path_no_ext)
-            _MOD_CACHE[visual_mod.name] = visual_mod
-            print(f"[CreateH3RefMod] saved {_summarize(visual_mod)} -> {visual_path}")
-        if include_audio:
-            audio_mod = rows[-1][0]
-            audio_path = audio_mod.save(audio_path_no_ext)
-            _MOD_CACHE[audio_mod.name] = audio_mod
-            print(f"[CreateH3RefMod] saved {_summarize(audio_mod)} -> {audio_path}")
+        if save_layout == "bundle":
+            destination = save_refmod_bundle(bundle_path_no_ext, bundle_name, [mod for mod, _ in rows])
+            _copy_refmod_thumbnail(images, bundle_path_no_ext)
+            for mod, _ in rows:
+                _MOD_CACHE[mod.name] = mod
+            print(f"[CreateH3RefMod] saved bundle '{bundle_name}' with {len(rows)} member(s) -> {destination}")
+        else:
+            if visual_mod is not None:
+                visual_path = visual_mod.save(visual_path_no_ext)
+                _copy_refmod_thumbnail(images, visual_path_no_ext)
+                _MOD_CACHE[visual_mod.name] = visual_mod
+                print(f"[CreateH3RefMod] saved {_summarize(visual_mod)} -> {visual_path}")
+            if include_audio:
+                audio_mod = rows[-1][0]
+                audio_path = audio_mod.save(audio_path_no_ext)
+                _MOD_CACHE[audio_mod.name] = audio_mod
+                print(f"[CreateH3RefMod] saved {_summarize(audio_mod)} -> {audio_path}")
         if len(_MOD_CACHE) > _MOD_CACHE_MAX:
             _MOD_CACHE.pop(next(iter(_MOD_CACHE)))
         _nodes_mod._MOD_LIST_CACHE_KEY = None  # refresh the loader dropdown
@@ -910,10 +944,6 @@ def _create_mod_from_folder(
     print(f"[CreateH3RefMod] complete: {len(rows)} reference(s), {total_tokens} tokens")
     return rows
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Node
-# ═══════════════════════════════════════════════════════════════════════════
 
 class H3RefModCreateFromFolder(io.ComfyNode):
     """Create a RefMod from every image/video/audio in a folder.
@@ -969,6 +999,9 @@ class H3RefModCreateFromFolder(io.ComfyNode):
                     tooltip="manual preserves controls. identity_encode: identity + voice, Full Reference, resolution=1024, steps=0. "
                             "style_experimental: style + voice, Compressed Reference, 8x8 pool, 150 steps. "
                             "motion_sequence: pose_motion + voice, Compressed Reference, 16x16 pool; preserves frame limit and Refinement Steps."),
+                io.Boolean.Input("advanced", default=False,
+                    label_on="advanced", label_off="simple",
+                    tooltip="Preset display mode. simple hides most preset-managed controls; advanced shows the fuller control set while preserving the same preset values."),
                 io.Combo.Input("concept_type", options=list(CONCEPT_TYPES), default="identity",
                     tooltip="What this mod represents. 'identity' (default) = a specific "
                             "person/character; also pose_motion, clothing, background, style, "
@@ -979,7 +1012,7 @@ class H3RefModCreateFromFolder(io.ComfyNode):
                     tooltip="How to label embedded audio in this RefMod. Matches upstream audio "
                             "concept labels: voice (default), singing, music_style, sound_fx, "
                             "ambience."),
-                io.Combo.Input("mode", options=["Full Reference", "Compressed Reference", "encode", "training"], default="Full Reference",
+                io.Combo.Input("mode", options=["Full Reference", "Compressed Reference"], default="Full Reference",
                     tooltip="'Full Reference' (default) = full-res VAE encode, max identity (~1K "
                             "tokens/img) — recommended for people. 'Compressed Reference' = pooled grid "
                             "refined by 'Refinement Steps' — cheaper, concept/motion only. Legacy "
@@ -1047,6 +1080,8 @@ class H3RefModCreateFromFolder(io.ComfyNode):
                     tooltip="Optional folder inside the RefMods save directory, for example celebs or voices."),
                 io.Boolean.Input("save", default=True, label_on="save", label_off="don't save",
                     tooltip="Save the mod to disk so Load H3 RefMods can pick it up later."),
+                io.Combo.Input("save_layout", options=["bundle", "separate_files"], default="bundle",
+                    tooltip="bundle (default) saves one single-file RefMod that can contain visual and audio members together. separate_files keeps the older *_Video and *_Audio files."),
             ],
             outputs=[
                 io.Custom("H3_REF_MODS").Output("mods",
@@ -1066,7 +1101,8 @@ class H3RefModCreateFromFolder(io.ComfyNode):
             audio_max_seconds=30.0, audio_max_tokens=5120,
             audio_budget_policy="error", max_total_tokens=0,
             description="", subfolder="", budget_policy="truncate",
-            save=True, use_subfolders=False, save_dir="") -> io.NodeOutput:
+            save=True, save_layout="bundle", advanced=False, use_subfolders=False, save_dir="") -> io.NodeOutput:
+        del advanced
         del save_dir
         raw_folder = (folder or "").strip().strip('"')
         if not (folder or "").strip().strip('"'):
@@ -1104,7 +1140,7 @@ class H3RefModCreateFromFolder(io.ComfyNode):
                     audio_max_seconds, audio_max_tokens,
                     audio_budget_policy, max_total_tokens,
                     _auto_folder_description(sub, concept_type), subfolder,
-                    save, budget_policy, merge, motion_only, extraction_preset,
+                    save, save_layout, budget_policy, merge, motion_only, extraction_preset,
                 )
                 mods.extend(created)
             return io.NodeOutput(mods)
@@ -1116,576 +1152,15 @@ class H3RefModCreateFromFolder(io.ComfyNode):
             identity, multiplier, max_frames, background_retention,
             audio_max_seconds, audio_max_tokens,
             audio_budget_policy, max_total_tokens, description, subfolder,
-            save, budget_policy, merge, motion_only, extraction_preset,
+            save, save_layout, budget_policy, merge, motion_only, extraction_preset,
         )
-        return io.NodeOutput(rows)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Node: H3RefModExtract (V3 — Autogrow reference inputs)
-# ═══════════════════════════════════════════════════════════════════════════
-
-class H3RefModCreateFromInputs(io.ComfyNode):
-    """
-    Turn one or more references of the same concept into a RefMod.
-
-    Refs are added with the "+" button: stills plug into ``ref_image_1``,
-    video frames into ``ref_video_1``, and the next slot of that type appears.
-    Each ref is one row of the same concept (different angle / expression /
-    setting / a dance move); they are stacked into a video-kind mod.
-
-    Two modes:
-
-      * ``encode`` (default) — each ref is resized to ``ref_resolution`` short
-        edge (down only) and VAE-encoded at that resolution, exactly like the
-        official ref2video node.  The mod stores the real encode, so identity
-        (a face, an outfit) comes through; files are ~0.2-1 MB per frame.
-        (Old name: ``full``.)
-      * ``training`` — each ref is first resized to ``ref_resolution`` short
-        edge too (the latent is pooled to a tiny grid anyway, so encoding at
-        native resolution is wasted compute — this is the main speed dial for
-        training mode), then average-pooled to a tiny grid (4x4 = 4 tokens
-        per frame) and refined with gradient steps against the encode — still
-        no diffusion model.  Nearly free to inject but only carries concept /
-        motion, not fine identity.  (Old name: ``pooled``.)
-
-    ``identity`` (training mode only) is the refinement loop — the only
-    "training" in the pack.
-
-    ``max_tokens`` (0 = off) hard-caps the total injected tokens: when the
-    stacked refs exceed it, near-duplicate latent frames are dropped first,
-    then frames are resampled to fit (see ``core.fit_token_budget``).
-
-    Flagged as an output node (``is_output_node=True``) so it runs standalone
-    even when nothing is wired to its ``mods`` output — it still saves to
-    disk either way.
-    """
-
-    @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="H3RefModCreateFromInputs",
-            display_name="Create H3 RefMod From Inputs (Deprecated)",
-            description=(
-                "Turn one or more references of the same concept into a RefMod. "
-                "Stills plug into ref_image_1, video frames into ref_video_1, "
-                "and the next slot of that type appears. refs are stacked into "
-                "one video-kind mod, so a multi-image moodboard keeps each ref's "
-                "own content instead of averaging away. 'training' mode (default) "
-                "compresses the refs to a grid and refines it — good identity at "
-                "a fraction of the tokens; 'encode' stores the full-res encode "
-                "(max identity, MB-size mod, ~1K tokens/img). Optional audio can "
-                "be extracted into a paired audio RefMod using the MiniMax H3 audio VAE. "
-                "Deprecated: for future workflows, prefer 'Create H3 RefMod Master' from "
-                "ComfyUI-MiniMaxH3Mod."
-            ),
-            category="H3RefModPicker",
-            inputs=[
-                io.String.Input("name", default="my_concept",
-                    tooltip="Saved mod name (appears in the Load H3 RefMods dropdown after a reload)."),
-                io.Combo.Input("extraction_preset", options=["manual", "identity_encode", "style_experimental", "motion_sequence"], default="identity_encode", optional=True,
-                    tooltip="manual preserves controls. identity_encode: identity + voice, Full Reference, resolution=1024, steps=0, merge/motion_only off. style_experimental: style + voice, Compressed Reference, pool=8x8, steps=150, merge/motion_only off. motion_sequence: pose_motion + voice, Compressed Reference, pool=16x16, merge/motion_only off; preserves frame limit and Refinement Steps."),
-                io.Combo.Input("mode", options=["Compressed Reference", "Full Reference", "training", "encode"],
-                    default="Compressed Reference",
-                    tooltip="Compressed Reference pools the latent and optionally refines its reconstruction. "
-                            "Full Reference stores the VAE encode, subject to resolution/frame/token limits. "
-                            "Neither mode trains H3 weights. Legacy mode values remain accepted."),
-                io.Combo.Input("concept_type", options=list(CONCEPT_TYPES), default="generic",
-                    tooltip="What this mod represents — 'identity' (a specific person/character), "
-                            "'pose_motion' (a pose/dance/gesture/camera move), 'clothing', "
-                            "'background', 'style', or 'generic'. Stored in the mod and used by "
-                            "the loaders' prompt_hint output (merges concept_type + description "
-                            "into a string you can concat onto your CLIP prompt). 'identity' in "
-                            "training mode with a small grid also triggers a warning nudging you "
-                            "toward 'encode' mode or a bigger grid — pooling is lossy in exactly "
-                            "the way that destroys facial identity."),
-                io.Autogrow.Input("refs_image", optional=True,
-                    template=io.Autogrow.TemplatePrefix(
-                        input=io.Image.Input("ref_image", tooltip="Reference still: one image of the "
-                            "concept (angle / expression / outfit). Optional — leave empty when using "
-                            "video refs and/or a folder bundle."),
-                        prefix="ref_image_", min=0, max=16)),
-                io.Autogrow.Input("refs_video", optional=True,
-                    template=io.Autogrow.TemplatePrefix(
-                        input=io.Image.Input("ref_video", tooltip="Reference video frames "
-                            "[T,H,W,C] (a multi-frame batch = a video ref with motion). "
-                            "Optional — leave empty when using image refs and/or a folder bundle."),
-                        prefix="ref_video_", min=0, max=8)),
-                io.Custom("H3_REF_LIST").Input("refs_bundle", optional=True,
-                    tooltip="All images/videos from a Load H3 RefMod Folder node, appended after "
-                            "the autogrow refs (bulk extraction)."),
-                io.Mask.Input("mask", optional=True,
-                    tooltip="Subject mask (or a batch, one per reference in order: images then "
-                            "videos) marking what to keep at full weight. Everything outside the "
-                            "mask collapses toward a heavily blurred copy of itself per spatial "
-                            "cell (stays in-distribution — a flat noise-mix here decodes as a "
-                            "woven/static texture instead of 'nothing'), controlled by "
-                            "background_retention. Fixes 'encode' mode pulling in a background/style "
-                            "that doesn't belong to the subject. A single mask broadcasts to every "
-                            "reference; a batch must match the reference count."),
-                io.Float.Input("background_retention", default=0.0, min=0.0, max=1.0, step=0.05,
-                    tooltip="Only used when 'mask' is connected. Floor weight for the region "
-                            "outside the mask: 0 = that region collapses to a heavily blurred "
-                            "copy of itself (kills specific structure like a skyline/treeline "
-                            "while staying smooth and in-distribution), 1 = mask has no effect. "
-                            "Middle values (0.3-0.6) partially blur instead of fully."),
-                io.Custom("MINIMAX_H3_AV_ENCODER").Input("av_encoder", optional=True,
-                    tooltip="MiniMax-H3 VAE loader output. Its saved video/audio paths are "
-                            "resolved locally, so RefMod extraction no longer imports the "
-                            "external pack's internals."),
-                io.Vae.Input("vae", optional=True,
-                    tooltip="Standard VAE, used when av_encoder is not connected."),
-                io.Audio.Input("audio", optional=True,
-                    tooltip="Optional audio reference. When connected with an H3 audio VAE, "
-                            "Create From Inputs also emits a paired *_Audio RefMod."),
-                io.Vae.Input("audio_vae", optional=True,
-                    tooltip="MiniMax H3 audio VAE. If av_encoder is connected, its audio path "
-                            "can be resolved locally when this socket is left empty."),
-                io.Int.Input("ref_resolution", default=1024, min=256, max=2048, step=64,
-                    tooltip="Target short edge in px (downscale only, never upscale), applied to "
-                            "BOTH modes: 'encode' stores at that res, 'training' encodes smaller "
-                            "too (it pools to a grid anyway, so native-res encoding is wasted "
-                            "compute — this is the main speed dial for training mode). 1024 is a "
-                            "good default; 512 halves encode cost; 2048 = official max fidelity, "
-                            "4x the tokens of 1024."),
-                io.Int.Input("pool_h", default=16, min=2, max=64, step=2,
-                    tooltip="Pooled mode: spatial latent grid after pooling. The grid is auto-fit to "
-                            "the source's aspect ratio (long edge = max of the two dials, other edge "
-                            "derived), so a portrait person isn't squished into a square grid "
-                            "(the 'fat/chubby' distortion). Square sources keep the exact dial value. "
-                            "16x16 = 64 tokens/frame (concept sweet spot); 32x32 = 256; 64x64 = 1024, "
-                            "full-mode parity for identity."),
-                io.Int.Input("pool_w", default=16, min=2, max=64, step=2,
-                    tooltip="Pooled mode: grid width (long edge if the source is wider than tall)."),
-                io.Int.Input("latent_frames", default=16, min=1, max=2147483647,
-                    tooltip="Per-video temporal limit. Encode mode samples up to this many source frames "
-                            "before VAE encoding and causal 4k+1 trimming; training mode pools to "
-                            "up to this many latent frames after encoding. Set at least the source "
-                            "frame count to avoid encode-mode sampling. Images use 1. Higher values "
-                            "increase memory and token cost; max_tokens can still reduce the result."),
-                io.Int.Input("identity", display_name="Refinement Steps", default=500, min=0, max=2000, step=50,
-                    tooltip="Compressed Reference only: optimization steps to reduce latent reconstruction "
-                            "error. 0 uses pooling alone. This is not identity strength or model training."),
-                io.Boolean.Input("merge", default=False,
-                    label_on="merge", label_off="stack",
-                    tooltip="Merge mode (training only): instead of stacking each ref's own pooled latent, "
-                            "optimize ONE shared grid against every full encode jointly."),
-                io.Boolean.Input("motion_only", default=False,
-                    label_on="motion", label_off="full",
-                    tooltip="EXPERIMENTAL — extract only what MOVES. Video refs are converted to per-frame "
-                            "temporal differences before encoding. Training mode only; combines with merge."),
-                io.Int.Input("multiplier", default=1, min=1, max=10, step=1,
-                    tooltip="Data multiplier: repeat the extracted ref N times along time so a short "
-                            "video/GIF (few tokens) isn't drowned out by the main video's tokens. "
-                            "Each repeat duplicates the same latent frames, so attention weight on "
-                            "the ref scales roughly with N. 1 = no repeat; file size grows with N."),
-                io.Int.Input("max_tokens", default=5120, min=0, max=2147483647, step=512,
-                    tooltip="Hard cap on the total tokens the mod injects (0 = no cap; 5120 is a good "
-                            "performance default). If the stacked refs exceed it, near-duplicate "
-                            "latent frames are dropped first (video refs are full of frames that "
-                            "differ only by noise — each one still costs a token per spatial patch "
-                            "in every block), then frames are resampled to fit. The cap is honored "
-                            "after the multiplier. Lower latent_frames/ref_resolution instead to "
-                            "avoid wasting encode work: ~23K tokens = one 1024px encode-mode video "
-                            "ref at 16 frames."),
-                io.Float.Input("audio_max_seconds", default=30.0, min=0.025, max=600.0,
-                    tooltip="Optional audio reference length cap before encoding. Longer audio "
-                            "creates more tokens; 30 seconds matches the upstream master default."),
-                io.Int.Input("audio_max_tokens", default=5120, min=0, max=2147483647, step=512,
-                    tooltip="Optional hard cap on the paired audio RefMod token count (0 = no cap)."),
-                io.Combo.Input("audio_budget_policy", options=["error", "truncate"], default="error",
-                    tooltip="On audio_max_tokens overflow: error stops without saving, truncate crops "
-                            "the audio latent to fit the token budget."),
-                io.Combo.Input("audio_concept_type", options=list(AUDIO_CONCEPT_TYPES), default="voice",
-                    tooltip="How to label the optional paired audio RefMod: voice, singing, "
-                            "music_style, sound_fx, or ambience."),
-                io.Int.Input("max_total_tokens", default=0, min=0, max=1048576, step=512,
-                    tooltip="Extra combined cap across visual and audio tokens. 0 disables this "
-                            "shared limit."),
-                io.Combo.Input("budget_policy", options=["truncate", "error"], default="truncate", optional=True,
-                    tooltip="On max_tokens overflow: truncate uses the existing frame reduction; error stops without saving. 0 max_tokens disables the cap."),
-                io.String.Input("subfolder", default="", optional=True,
-                    tooltip="Optional folder inside models/refmods, for example celebs or voices."),
-                io.String.Input("description", default="", multiline=True,
-                    tooltip="Optional text describing the concept (e.g. 'a ginger woman with messy "
-                            "hair', 'an animation style', 'handheld camera movement'). Stored in "
-                            "the mod and printed in the info block — documentation only, no wiring."),
-                io.Boolean.Input("save", default=True, label_on="save", label_off="don't save",
-                    tooltip="Save the mod to ComfyUI models/refmods/ so Load H3 RefMods can pick "
-                            "it up later. If a mod with this name already exists there, it is "
-                            "never overwritten — the save name gets '_2', '_3', etc. appended "
-                            "instead (the console prints the final name used)."),
-            ],
-            outputs=[
-                io.Custom("H3_REF_MODS").Output("mods",
-                    tooltip="Bundle with this one mod at strength 1.0. Feed it to Apply H3 RefMod "
-                            "(or Load H3 RefMods after saving)."),
-            ],
-            is_output_node=True,
-        )
-
-    @classmethod
-    def execute(cls, name, mode, refs_image=None, refs_video=None, refs_bundle=None,
-                av_encoder=None, vae=None, audio=None, audio_vae=None,
-                ref_resolution=1024, pool_h=16, pool_w=16, latent_frames=16,
-                identity=500, multiplier=1, max_tokens=0,
-                audio_max_seconds=30.0, audio_max_tokens=5120,
-                audio_budget_policy="error", audio_concept_type="voice",
-                max_total_tokens=0, description="", save=True,
-                concept_type="generic", mask=None, background_retention=0.0,
-                subfolder="", merge=False, motion_only=False,
-                extraction_preset="identity_encode", budget_policy="truncate",
-                **legacy) -> io.NodeOutput:
-        if budget_policy not in ("truncate", "error"):
-            raise ValueError("Unknown visual token budget policy.")
-        if audio_budget_policy not in ("error", "truncate"):
-            raise ValueError("Unknown audio token budget policy.")
-        name = _sanitize_name(name)
-        mode, ref_resolution, pool_h, pool_w, identity, merge, motion_only, concept_type, audio_concept_type = _apply_extraction_preset(
-            mode, ref_resolution, pool_h, pool_w, identity, merge, motion_only,
-            concept_type, audio_concept_type, extraction_preset,
-            "H3RefModExtract"
-        )
-        ignored = []
-        if mode == "encode":
-            ignored.append("pool_h, pool_w, Refinement Steps, merge, motion_only (Full Reference)")
-        if mask is None:
-            ignored.append("background_retention (no mask)")
-        if max_tokens == 0:
-            ignored.append("budget_policy (max_tokens=0)")
-        if ignored:
-            print("[H3RefModExtract] ignored: " + "; ".join(ignored))
-        if concept_type == "identity" and mode == "training" and max(pool_h, pool_w) < 16:
-            print(
-                f"[H3RefModExtract] warning: concept_type='identity' with "
-                f"mode='training' at a {pool_h}x{pool_w} grid — pooling averages away "
-                f"exactly the detail that carries a face (this is almost certainly "
-                f"your 'chubby/older' drift). For a person, either switch mode='encode' "
-                f"(real identity, higher token cost) or raise pool_h/pool_w toward "
-                f"32x32+ and expect it to still be a soft approximation, not a lock."
-            )
-        # old pre-Autogrow workflows pass their widget values through as kwargs:
-        # map them onto the new inputs so those saved workflows keep running.
-        # ``pool`` is the old height; ``pool_w`` arrives as the named param.
-        if legacy.get("optimize") is not None:
-            identity = legacy["optimize"]
-        if legacy.get("pool") is not None:
-            pool_h = int(legacy["pool"])
-            if pool_w == 16:  # old single-pool default: square grid
-                pool_w = pool_h
-        wants_audio = audio is not None
-        if av_encoder is None and vae is None and not wants_audio:
-            raise ValueError(
-                "H3RefModExtract: connect an av_encoder (MiniMax-H3 "
-                "VAE loader) or a standard VAE.")
-        if av_encoder is not None:
-            vae, loaded_audio_vae = load_h3_vaes_from_av_encoder(av_encoder, load_audio=wants_audio and audio_vae is None)
-            if audio_vae is None:
-                audio_vae = loaded_audio_vae
-        if vae is None and not wants_audio:
-            raise ValueError("H3RefModExtract: no video VAE available for encoding.")
-        if wants_audio and audio_vae is None:
-            raise ValueError("H3RefModExtract: audio references require the MiniMax H3 audio VAE.")
-        if merge and mode != "training":
-            print("[H3RefModExtract] warning: 'merge' only applies to training mode — stacking the refs as usual for mode='encode'.")
-        if motion_only and mode != "training":
-            print("[H3RefModExtract] warning: 'motion_only' only applies to training mode — extracting the full appearance for mode='encode'.")
-            motion_only = False
-
-        # each Autogrow arrives as a dict keyed by its slot names
-        # (ref_image_1..N / ref_video_1..N); videos stay multi-frame, images are
-        # pinned to a single still.  Legacy workflows used flat image /
-        # ref_image_N / ref_video_N inputs; a folder bundle is appended last.
-        ordered = []
-        for key in sorted((refs_image or {}).keys(),
-                          key=lambda k: int(k.rsplit("_", 1)[1])):
-            src = (refs_image or {})[key]
-            if src is not None:
-                ordered.append((src, False))
-        for key in sorted((refs_video or {}).keys(),
-                          key=lambda k: int(k.rsplit("_", 1)[1])):
-            src = (refs_video or {})[key]
-            if src is not None:
-                ordered.append((src, True))
-        legacy_keys = sorted(
-            (k for k in legacy if k == "image" or k.startswith("ref_image_")
-             or k.startswith("ref_video_")),
-            key=lambda k: (0 if k == "image" else 1 if k.startswith("ref_image_") else 2,
-                           int(k.rsplit("_", 1)[1]) if "_" in k else 0))
-        for key in legacy_keys:
-            if legacy[key] is not None:
-                ordered.append((legacy[key], key.startswith("ref_video_")))
-        if refs_bundle is not None:
-            for src in refs_bundle:
-                if src is not None:
-                    norm = _normalize_ref(src, label="folder reference")
-                    ordered.append((norm, norm.shape[0] > 1))
-        has_visual = bool(ordered)
-        if not has_visual and audio is None:
-            raise ValueError(
-                "H3RefModExtract: connect at least one image to "
-                "ref_image_1, or video frames to ref_video_1, or audio to the audio socket.")
-
-        rows: List[Tuple[H3RefMod, float]] = []
-        description = (description or "").strip()
-        requested_base = _base_refmod_name(name)
-        visual_name, audio_name = _paired_refmod_names(requested_base)
-
-        if has_visual:
-            if vae is None:
-                raise ValueError("H3RefModExtract: visual references require the MiniMax H3 video VAE.")
-            sources = []
-            for i, (src, is_video) in enumerate(ordered):
-                norm = _normalize_ref(src, label=f"reference {i + 1}")
-                if is_video:
-                    sources.append((norm, norm.shape[0] > 1))
-                else:
-                    sources.append((norm[:1], False))
-            canvas = None
-            if mode == "encode" and len(sources) > 1:
-                h, w = sources[0][0].shape[1], sources[0][0].shape[2]
-                scale = min(1.0, ref_resolution / min(h, w))
-                canvas = (max(32, round(w * scale / 32) * 32),
-                          max(32, round(h * scale / 32) * 32))
-            pool_grid = None
-            if mode == "training":
-                h0, w0 = sources[0][0].shape[1], sources[0][0].shape[2]
-                pool_grid = aspect_grid(pool_h, pool_w, h0 / w0)
-                if pool_grid != (pool_h, pool_w):
-                    print(f"[H3RefModExtract] pooled grid {pool_h}x{pool_w} -> "
-                          f"{pool_grid[0]}x{pool_grid[1]} to match source aspect "
-                          f"{w0}x{h0} (avoids squishing the subject wide)")
-            gh, gw = pool_grid if pool_grid is not None else (pool_h, pool_w)
-
-            mask_batch = _normalize_mask_batch(mask, label="mask")
-            if mask_batch is not None:
-                if mask_batch.shape[0] == 1 and len(sources) > 1:
-                    mask_batch = mask_batch.expand(len(sources), -1, -1)
-                elif mask_batch.shape[0] != len(sources):
-                    raise ValueError(
-                        f"H3RefModExtract: mask has {mask_batch.shape[0]} entries but "
-                        f"there are {len(sources)} references (images then videos, in order). "
-                        f"Connect one mask (broadcasts to every ref) or exactly one per ref.")
-
-            frames = []
-            n_img = n_vid = 0
-            source_shapes = []
-            n_refs = len(sources)
-            motion_applied = False
-            motion_warned = False
-            merge_refs = [] if (merge and mode == "training" and n_refs > 1) else None
-            pbar = comfy.utils.ProgressBar(n_refs)
-            for src_idx in range(len(sources)):
-                src, is_video = sources[src_idx]
-                label = f"ref {src_idx + 1}/{n_refs} ({'video' if is_video else 'image'})"
-                print(f"[H3RefModExtract] {label}: "
-                      f"source {tuple(src.shape)}, mode={mode}"
-                      + (f", identity={identity} steps" if mode == "training" and identity > 0 else ""))
-                if mode == "encode":
-                    if is_video and latent_frames < src.shape[0]:
-                        idx = torch.linspace(0, src.shape[0] - 1, latent_frames).round().long()
-                        src = src[idx]
-                    src = _resize_ref(src, ref_resolution, canvas)
-                else:
-                    orig = (src.shape[1], src.shape[2])
-                    src = _resize_ref(src, ref_resolution, None)
-                    if (src.shape[1], src.shape[2]) != orig:
-                        print(f"[H3RefModExtract] {label}: resized "
-                              f"{orig[0]}x{orig[1]} -> {src.shape[1]}x{src.shape[2]} "
-                              f"(ref_resolution={ref_resolution}) before encode")
-                if motion_only and is_video and src.shape[0] > 1:
-                    diffs = (src[1:] - src[:-1]).abs()
-                    peak = diffs.max()
-                    if peak > 1e-6:
-                        diffs = diffs / peak
-                    src = diffs
-                    motion_applied = True
-                    print(f"[H3RefModExtract] {label}: motion_only — encoded temporal differences instead of the frames (static appearance stripped)")
-                elif motion_only and not is_video and not motion_warned:
-                    print("[H3RefModExtract] warning: motion_only needs video refs — a still has no motion, keeping its appearance.")
-                    motion_warned = True
-                src = _ensure_min_size(src)
-                if is_video and src.shape[0] > 1:
-                    valid_t = _snap_to_causal_grid(src.shape[0])
-                    if valid_t != src.shape[0]:
-                        print(f"[H3RefModExtract] reference {src_idx + 1} "
-                              f"(video): trimming {src.shape[0]} -> {valid_t} frames "
-                              f"to match the VAE's causal 4k+1 grid.")
-                        src = src[:valid_t]
-                mask_px = None
-                if mask_batch is not None:
-                    mask_px = _resize_mask(
-                        mask_batch[src_idx:src_idx + 1],
-                        src.shape[1],
-                        src.shape[2],
-                        "center" if mode == "encode" and canvas is not None else "disabled",
-                    )
-                if src.shape[1] <= 0 or src.shape[2] <= 0:
-                    raise ValueError(
-                        f"H3RefModExtract: reference {src_idx + 1} "
-                        f"({'video' if is_video else 'image'}) has an empty frame "
-                        f"{tuple(src.shape)} right before VAE encode (mode={mode}, "
-                        f"ref_resolution={ref_resolution}, canvas={canvas}). "
-                        f"Check that this specific reference's source image/video "
-                        f"is valid.")
-                z = vae.encode(src)
-                if z.dim() != 5 or z.shape[1] != 24:
-                    raise ValueError(
-                        f"Expected a MiniMax H3 video VAE latent [1,24,T,H,W], "
-                        f"got {tuple(z.shape)}. The connected VAE is not the H3 VAE.")
-                source_shapes.append(f"{z.shape[2]}x{z.shape[3]}x{z.shape[4]}")
-
-                if mask_px is not None:
-                    z = _mask_latent(z, mask_px, background_retention, seed_key=f"{name}:{src_idx}")
-                    print(f"[H3RefModExtract] {label}: applied subject mask "
-                          f"(background_retention={background_retention})")
-
-                if mode == "encode":
-                    pooled = z.to(torch.float16)
-                else:
-                    pool_t = min(latent_frames, z.shape[2]) if is_video else 1
-                    gh, gw = pool_grid if pool_grid is not None else (pool_h, pool_w)
-                    pooled = pool_latent(z, pool_t, gh, gw).to(torch.float16)
-                    if merge_refs is not None:
-                        merge_refs.append((pooled.cpu(), z.float().cpu()))
-                    elif identity > 0:
-                        print(f"[H3RefModExtract] {label}: refining identity "
-                              f"({int(identity)} gradient steps)...")
-                        pooled = optimize_latent(pooled, z.float(), steps=int(identity),
-                                                  progress_every=100)
-                        print(f"[H3RefModExtract] {label}: identity refinement done")
-                if merge_refs is None:
-                    frames.append(pooled)
-                if is_video:
-                    n_vid += 1
-                else:
-                    n_img += 1
-                pbar.update_absolute(src_idx + 1)
-                print(f"[H3RefModExtract] {label}: encoded "
-                      f"{tuple(pooled.shape)} ({pooled.numel() * pooled.element_size() / 1024 / 1024:.2f} MB)")
-                sources[src_idx] = None
-                src = None
-                z = None
-
-            if mode == "encode" and identity > 0:
-                print(f"[H3RefModExtract] warning: 'identity' only applies to "
-                      f"training mode — encode mode stores the actual encode, so "
-                      f"identity={identity} was ignored.")
-
-            merged_n = 0
-            if merge_refs is not None:
-                common_t = max(p.shape[2] for p, _ in merge_refs)
-                init = torch.stack([pool_latent(p, common_t, gh, gw) for p, _ in merge_refs]).mean(0)
-                print(f"[H3RefModExtract] merging {len(merge_refs)} references into one shared {common_t}x{gh}x{gw} latent"
-                      + (f", {int(identity)} joint gradient steps" if identity > 0 else " (pure pooling mean — identity=0)"))
-                if identity > 0:
-                    init = optimize_latent_multi(init, [f for _, f in merge_refs], steps=int(identity), progress_every=100)
-                    print("[H3RefModExtract] merge refinement done")
-                latent = init.to(torch.float16)
-                merged_n = len(merge_refs)
-            else:
-                latent = torch.cat(frames, dim=2)
-            if multiplier > 1:
-                latent = latent.repeat(1, 1, multiplier, 1, 1)
-            if max_tokens > 0:
-                tokens = _latent_token_count(latent)
-                if budget_policy == "error" and tokens > max_tokens:
-                    raise ValueError(
-                        f"RefMod '{name}' requires {tokens} visual tokens after multiplier; budget is {max_tokens}. "
-                        "Increase max_tokens, reduce extraction settings, or select truncate. Nothing was saved."
-                    )
-                latent = fit_token_budget(latent, max_tokens, name)
-            total_t = latent.shape[2]
-            kind = "video" if total_t > 1 else "image"
-            px_w, px_h = latent.shape[4] * 16, latent.shape[3] * 16
-            if merged_n:
-                source = f"merge {merged_n} refs"
-            elif len(frames) > 1:
-                source = "stack"
-            else:
-                source = "video" if n_vid else "image"
-            visual_mod = H3RefMod(
-                name=visual_name,
-                kind=kind,
-                latent=latent,
-                latent_h=latent.shape[3],
-                latent_w=latent.shape[4],
-                latent_t=total_t,
-                mode=mode,
-                source=source,
-                source_shape=" +".join(source_shapes),
-                pool=f"full-res {px_w}x{px_h}px (short-edge cap {ref_resolution}px)" if mode == "encode" else f"{total_t}x{gh}x{gw}",
-                optimize_steps=int(identity) if mode == "training" else 0,
-                tags=[f"{n_img} img, {n_vid} vid"]
-                    + ([f"merged {merged_n} refs"] if merged_n else [])
-                    + (["motion_only"] if motion_applied else [])
-                    + ([f"x{multiplier} repeat"] if multiplier > 1 else [])
-                    + ([f"masked (bg_retention={background_retention})"] if mask_batch is not None else []),
-                description=description,
-                concept_type=concept_type,
-                audio_concept_type="",
-            )
-            rows.append((visual_mod, 1.0))
-
-        if audio is not None:
-            rows.append((
-                _make_audio_refmod_from_input(
-                    audio_name, audio_vae, audio,
-                    max_seconds=audio_max_seconds,
-                    max_tokens=audio_max_tokens,
-                    budget_policy=audio_budget_policy,
-                    description=description,
-                    concept_type=audio_concept_type,
-                ),
-                1.0,
-            ))
-
-        total_tokens = _check_total_token_budget(rows, max_total_tokens)
-
-        if save:
-            out_dir = _resolve_output_dir(subfolder)
-            resolved_base, saved_visual_name, visual_path_no_ext, saved_audio_name, audio_path_no_ext = _unique_split_mod_paths(
-                out_dir, requested_base, include_audio=audio is not None)
-            if has_visual and saved_visual_name != visual_name:
-                print(f"[H3RefModCreateFromInputs] '{visual_name}' already exists — saving as "
-                      f"'{saved_visual_name}'"
-                      + (f" and '{saved_audio_name}'" if audio is not None else "")
-                      + " instead (existing mods are never overwritten).")
-                rows[0][0].name = saved_visual_name
-            elif (not has_visual) and audio is not None and saved_audio_name != audio_name:
-                print(f"[H3RefModCreateFromInputs] '{audio_name}' already exists — saving as "
-                      f"'{saved_audio_name}' instead (existing mods are never overwritten).")
-            saved_paths = []
-            for mod, _strength in rows:
-                if mod.kind == "audio":
-                    if mod.name != saved_audio_name:
-                        mod.name = saved_audio_name
-                    path = mod.save(audio_path_no_ext)
-                else:
-                    if mod.name != saved_visual_name:
-                        mod.name = saved_visual_name
-                    path = mod.save(visual_path_no_ext)
-                _MOD_CACHE[mod.name] = mod
-                saved_paths.append(path)
-                print(f"[H3RefModCreateFromInputs] saved {_summarize(mod)} -> {path}")
-            if len(_MOD_CACHE) > _MOD_CACHE_MAX:
-                _MOD_CACHE.pop(next(iter(_MOD_CACHE)))
-            _nodes_mod._MOD_LIST_CACHE_KEY = None
-        else:
-            for mod, _strength in rows:
-                print(f"[H3RefModCreateFromInputs] {_summarize(mod)} (not saved)")
-        if description:
-            print(f"[H3RefModCreateFromInputs] description: {description}")
-        print(f"[H3RefModCreateFromInputs] complete: {len(rows)} reference(s), {total_tokens} tokens")
         return io.NodeOutput(rows)
 
 
 NODE_CLASS_MAPPINGS = {
     "H3RefModCreateFromFolder": H3RefModCreateFromFolder,
-    "H3RefModCreateFromInputs": H3RefModCreateFromInputs,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3RefModCreateFromFolder": "Create H3 RefMod From Folder",
-    "H3RefModCreateFromInputs": "Create H3 RefMod From Inputs (Deprecated)",
 }

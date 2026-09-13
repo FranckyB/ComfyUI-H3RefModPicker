@@ -12,33 +12,28 @@ from ..py.refmod_browser import (
     paired_mod_path,
     safe_file_path,
 )
-from ..py.refmod_core import H3RefMod
+from ..py.refmod_core import H3RefMod, load_refmods_from_file
 from ..py.refmod_common import _prompt_hint
 from .refmod_loader import _MAX_WEIGHT, _append_weighted_mod, _weight_display
 
-_VISUAL_MOD_CACHE: Dict[str, H3RefMod] = {}
+_VISUAL_MOD_CACHE: Dict[str, Tuple[H3RefMod, ...]] = {}
 _VISUAL_MOD_CACHE_MAX = 24
-
-
-def _load_single_mod_from_path(mod_path: str) -> H3RefMod:
-    path = safe_file_path(mod_path)
-    if not path.lower().endswith(".safetensors"):
-        raise ValueError("Selected file is not a RefMod safetensors file.")
-    if path in _VISUAL_MOD_CACHE:
-        return _VISUAL_MOD_CACHE[path]
-    mod = H3RefMod.load(path[:-len(".safetensors")], device="cpu")
-    _VISUAL_MOD_CACHE[path] = mod
-    if len(_VISUAL_MOD_CACHE) > _VISUAL_MOD_CACHE_MAX:
-        _VISUAL_MOD_CACHE.pop(next(iter(_VISUAL_MOD_CACHE)))
-    return mod
 
 
 def _load_mods_from_path(mod_path: str) -> List[H3RefMod]:
     path = safe_file_path(mod_path)
-    mods = [_load_single_mod_from_path(path)]
-    paired_audio = paired_mod_path(path[:-len(".safetensors")], "audio")
-    if paired_audio is not None:
-        mods.append(_load_single_mod_from_path(paired_audio))
+    if not path.lower().endswith(".safetensors"):
+        raise ValueError("Selected file is not a RefMod safetensors file.")
+    if path in _VISUAL_MOD_CACHE:
+        return list(_VISUAL_MOD_CACHE[path])
+    mods = list(load_refmods_from_file(path[:-len(".safetensors")], device="cpu"))
+    if not any(mod.kind == "audio" for mod in mods):
+        paired_audio = paired_mod_path(path[:-len(".safetensors")], "audio")
+        if paired_audio is not None:
+            mods.extend(load_refmods_from_file(paired_audio[:-len(".safetensors")], device="cpu"))
+    _VISUAL_MOD_CACHE[path] = tuple(mods)
+    if len(_VISUAL_MOD_CACHE) > _VISUAL_MOD_CACHE_MAX:
+        _VISUAL_MOD_CACHE.pop(next(iter(_VISUAL_MOD_CACHE)))
     return mods
 
 

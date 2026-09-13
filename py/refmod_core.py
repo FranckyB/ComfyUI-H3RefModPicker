@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import tempfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -117,8 +118,10 @@ def read_refmod_meta(path_no_ext: str) -> Optional[Dict]:
     try:
         with safe_open(path_no_ext + ".safetensors", framework="pt") as f:
             meta = f.metadata()
-        if meta and META_KEY in meta:
-            return json.loads(meta[META_KEY])
+        if meta:
+            for key in (META_KEY, "audio_refmod_meta"):
+                if key in meta:
+                    return json.loads(meta[key])
     except Exception:
         pass
     jpath = path_no_ext + ".json"
@@ -129,6 +132,123 @@ def read_refmod_meta(path_no_ext: str) -> Optional[Dict]:
         except Exception:
             return None
     return None
+
+
+def refmod_bundle_members(meta: Dict) -> List[Dict]:
+    if not isinstance(meta, dict) or meta.get("_format_version") != 5 or meta.get("kind") != "bundle":
+        raise ValueError("Unsupported RefMod bundle format.")
+    refs = meta.get("members")
+    if not isinstance(refs, list) or not refs or len(refs) > 256:
+        raise ValueError("A RefMod bundle must contain 1-256 members.")
+    for ref in refs:
+        if not isinstance(ref, dict) or ref.get("kind") not in ("image", "video", "audio"):
+            raise ValueError("Invalid RefMod bundle member.")
+    return refs
+
+
+def refmod_capabilities(meta: Optional[Dict]) -> Dict[str, object]:
+    caps: Dict[str, object] = {
+        "kind": "unknown",
+        "has_visual": False,
+        "has_audio": False,
+        "member_count": 0,
+    }
+    if not isinstance(meta, dict):
+        return caps
+    kind = str(meta.get("kind", "") or "unknown")
+    caps["kind"] = kind
+    if kind == "bundle":
+        refs = refmod_bundle_members(meta)
+        caps["member_count"] = len(refs)
+        caps["has_visual"] = any(ref.get("kind") in ("image", "video") for ref in refs)
+        caps["has_audio"] = any(ref.get("kind") == "audio" for ref in refs)
+    elif kind in ("image", "video"):
+        caps["has_visual"] = True
+        caps["has_audio"] = int(meta.get("ref_audio_t", 0) or 0) > 0
+        caps["member_count"] = 1 + (1 if caps["has_audio"] else 0)
+    elif kind == "audio":
+        caps["has_audio"] = True
+        caps["member_count"] = 1
+    return caps
+
+
+def _standalone_audio_member_meta(meta: Dict) -> Dict:
+    name = str(meta.get("name", "refmod") or "refmod")
+    if not name.lower().endswith("_audio"):
+        name = f"{name}_Audio"
+    return {
+        **meta,
+        "name": name,
+        "kind": "audio",
+        "latent_h": 0,
+        "latent_w": 0,
+        "latent_t": int(meta.get("ref_audio_t", 0) or 0),
+        "concept_type": str(meta.get("audio_concept_type", meta.get("concept_type", "voice")) or "voice"),
+        "audio_concept_type": str(meta.get("audio_concept_type", "") or ""),
+        "ref_audio_t": int(meta.get("ref_audio_t", 0) or 0),
+        "sample_rate": int(meta.get("sample_rate", 32000) or 32000),
+    }
+
+
+def load_refmods_from_file(path_no_ext: str, device: str = "cpu") -> List["H3RefMod"]:
+    meta = read_refmod_meta(path_no_ext)
+    if not isinstance(meta, dict):
+        raise ValueError(
+            f"{path_no_ext}.safetensors has no RefMod metadata "
+            f"(header key '{META_KEY}' or sidecar .json missing)."
+        )
+    if meta.get("kind") == "bundle":
+        loaded: List[H3RefMod] = []
+        refs = refmod_bundle_members(meta)
+        with safe_open(path_no_ext + ".safetensors", framework="pt", device=device) as f:
+            for idx, member_meta in enumerate(refs):
+                latent = f.get_tensor(f"ref_{idx}").clone()
+                loaded.append(H3RefMod.from_metadata(member_meta, latent))
+        return loaded
+
+    tensors = load_file(path_no_ext + ".safetensors", device=device)
+    if "latent" not in tensors:
+        raise ValueError(f"{path_no_ext}.safetensors is missing its latent tensor.")
+    latent = tensors["latent"].clone()
+    audio_latent = tensors["audio_latent"].clone() if "audio_latent" in tensors else None
+    if meta.get("kind") == "audio":
+        return [H3RefMod.from_metadata(meta, latent)]
+
+    visual_meta = dict(meta)
+    visual_meta["ref_audio_t"] = 0
+    visual_meta["audio_concept_type"] = ""
+    loaded = [H3RefMod.from_metadata(visual_meta, latent)]
+    if audio_latent is not None and int(meta.get("ref_audio_t", 0) or 0) > 0:
+        loaded.append(H3RefMod.from_metadata(_standalone_audio_member_meta(meta), audio_latent))
+    return loaded
+
+
+def save_refmod_bundle(path_no_ext: str, name: str, mods: List["H3RefMod"]) -> str:
+    unique = list({id(mod): mod for mod in mods}.values())
+    if not unique:
+        raise ValueError("RefMod bundle is empty.")
+    metadata = {
+        "_format_version": 5,
+        "kind": "bundle",
+        "name": str(name or "refmod"),
+        "members": [mod.metadata() for mod in unique],
+    }
+    tensors = {
+        f"ref_{idx}": mod.latent.detach().cpu().contiguous().clone()
+        for idx, mod in enumerate(unique)
+    }
+    destination = path_no_ext + ".safetensors"
+    directory = os.path.dirname(destination) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".refmod-", suffix=".tmp", dir=directory)
+    os.close(fd)
+    try:
+        save_file(tensors, temporary, metadata={META_KEY: json.dumps(metadata)})
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return destination
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Latent compression
@@ -710,10 +830,7 @@ class H3RefMod:
 
     # ── serialization ─────────────────────────────────────────────────
 
-    def save(self, path_no_ext: str) -> str:
-        """Save as a single ``{path}.safetensors`` with metadata in the header."""
-        os.makedirs(os.path.dirname(path_no_ext) or ".", exist_ok=True)
-        has_audio_meta = self.kind == "audio" or (self.audio_latent is not None and self.ref_audio_t > 0)
+    def metadata(self) -> Dict:
         meta = {
             "name": self.name,
             "kind": self.kind,
@@ -728,12 +845,18 @@ class H3RefMod:
             "tags": self.tags,
             "description": self.description,
             "concept_type": self.concept_type,
-            "_format_version": 3,
+            "_format_version": 4,
         }
-        if has_audio_meta:
+        if self.kind == "audio" or (self.audio_latent is not None and self.ref_audio_t > 0):
             meta["audio_concept_type"] = self.audio_concept_type
             meta["ref_audio_t"] = self.ref_audio_t
             meta["sample_rate"] = self.sample_rate
+        return meta
+
+    def save(self, path_no_ext: str) -> str:
+        """Save as a single ``{path}.safetensors`` with metadata in the header."""
+        os.makedirs(os.path.dirname(path_no_ext) or ".", exist_ok=True)
+        meta = self.metadata()
         tensors = {"latent": self.latent.contiguous()}
         if self.audio_latent is not None and self.ref_audio_t > 0:
             tensors["audio_latent"] = self.audio_latent.contiguous()
@@ -742,20 +865,17 @@ class H3RefMod:
         return path_no_ext + ".safetensors"
 
     @classmethod
-    def load(cls, path_no_ext: str, device: str = "cpu") -> "H3RefMod":
-        """Load from ``{path}.safetensors`` (metadata in header, or legacy .json)."""
-        meta = read_refmod_meta(path_no_ext)
-        if meta is None:
-            raise ValueError(
-                f"{path_no_ext}.safetensors has no RefMod metadata "
-                f"(header key '{META_KEY}' or sidecar .json missing).")
-        # clone drops the file mmap, so the file isn't locked on Windows and
-        # can be re-saved over the same name
-        all_tensors = load_file(path_no_ext + ".safetensors", device=device)
-        latent = all_tensors["latent"].clone()
-        audio_latent = all_tensors["audio_latent"].clone() if "audio_latent" in all_tensors else None
+    def from_metadata(
+        cls,
+        meta: Dict,
+        latent: torch.Tensor,
+        *,
+        audio_latent: Optional[torch.Tensor] = None,
+    ) -> "H3RefMod":
+        if not isinstance(meta, dict):
+            raise ValueError("RefMod metadata must be a dict.")
         return cls(
-            name=meta.get("name", os.path.basename(path_no_ext)),
+            name=meta.get("name", "refmod"),
             kind=meta.get("kind", "image"),
             latent=latent,
             latent_h=int(meta.get("latent_h", latent.shape[3] if latent.ndim == 5 else 0)),
@@ -769,11 +889,26 @@ class H3RefMod:
             tags=list(meta.get("tags", [])),
             description=str(meta.get("description", "") or ""),
             concept_type=str(meta.get("concept_type", "generic") or "generic"),
-            audio_concept_type=str(
-                meta.get("audio_concept_type", "voice" if "audio_latent" in all_tensors else "") or ""
-            ),
+            audio_concept_type=str(meta.get("audio_concept_type", "") or ""),
             audio_latent=audio_latent,
-            ref_audio_t=int(meta.get("ref_audio_t", 0)),
-            sample_rate=int(meta.get("sample_rate", 32000)),
+            ref_audio_t=int(meta.get("ref_audio_t", 0) or 0) if audio_latent is not None else 0,
+            sample_rate=int(meta.get("sample_rate", 32000) or 32000),
         )
+
+    @classmethod
+    def load(cls, path_no_ext: str, device: str = "cpu") -> "H3RefMod":
+        """Load from ``{path}.safetensors`` (metadata in header, or legacy .json)."""
+        meta = read_refmod_meta(path_no_ext)
+        if meta is None:
+            raise ValueError(
+                f"{path_no_ext}.safetensors has no RefMod metadata "
+                f"(header key '{META_KEY}' or sidecar .json missing).")
+        if meta.get("kind") == "bundle":
+            raise ValueError("This is a RefMod bundle. Load its members instead of treating it as one latent.")
+        # clone drops the file mmap, so the file isn't locked on Windows and
+        # can be re-saved over the same name
+        all_tensors = load_file(path_no_ext + ".safetensors", device=device)
+        latent = all_tensors["latent"].clone()
+        audio_latent = all_tensors["audio_latent"].clone() if "audio_latent" in all_tensors else None
+        return cls.from_metadata(meta, latent, audio_latent=audio_latent)
 

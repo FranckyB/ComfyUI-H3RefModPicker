@@ -4,11 +4,12 @@ H3RefModLoader — load one RefMod and optionally append it to another
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 import os
 import folder_paths
+import server
 
-from ..py.refmod_core import H3RefMod, read_refmod_meta
+from ..py.refmod_core import H3RefMod, load_refmods_from_file, read_refmod_meta, refmod_capabilities
 
 from ..py.refmod_common import (
     _prompt_hint,
@@ -19,7 +20,7 @@ from ..py.refmod_common import (
     refmods_dir,
 )
 
-_MOD_CACHE: Dict[str, H3RefMod] = {}
+_MOD_CACHE: Dict[str, Tuple[H3RefMod, ...]] = {}
 _MOD_CACHE_MAX = 24            # cap: never pin more mods in RAM than this (FIFO eviction)
 _MOD_LIST_CACHE_KEY = None     # (dirs, mtimes, sizes) signature of the last _list_mod_names() scan
 _MOD_LIST_CACHE_VAL = None
@@ -78,7 +79,7 @@ def _list_mod_names() -> List[str]:
     if os.path.isdir(mods_dir):
         for rel_stem, abs_stem in _iter_mod_paths(mods_dir):
             meta = read_refmod_meta(abs_stem)
-            if meta is not None and meta.get("kind") in ("image", "video", "audio"):
+            if meta is not None and meta.get("kind") in ("image", "video", "audio", "bundle"):
                 names.add(rel_stem)
     _MOD_LIST_CACHE_KEY, _MOD_LIST_CACHE_VAL = key, sorted(names)
     return _MOD_LIST_CACHE_VAL
@@ -94,14 +95,35 @@ def _find_mod_path(name: str) -> str:
         f"  - {mods_dir}/{name}.safetensors")
 
 
-def _load_mod(name: str) -> H3RefMod:
+def _load_mods(name: str) -> List[H3RefMod]:
     if name in _MOD_CACHE:
-        return _MOD_CACHE[name]
-    mod = H3RefMod.load(_find_mod_path(name), device="cpu")
-    _MOD_CACHE[name] = mod
+        return list(_MOD_CACHE[name])
+    path = _find_mod_path(name)
+    mods = tuple(load_refmods_from_file(path, device="cpu"))
+    _MOD_CACHE[name] = mods
     if len(_MOD_CACHE) > _MOD_CACHE_MAX:
         _MOD_CACHE.pop(next(iter(_MOD_CACHE)))
-    return mod
+    return list(mods)
+
+
+def _load_mod(name: str) -> H3RefMod:
+    mods = _load_mods(name)
+    for mod in mods:
+        if mod.kind != "audio":
+            return mod
+    return mods[0]
+
+
+def _mod_capabilities(name: str) -> Dict[str, bool]:
+    path = _find_mod_path(name)
+    meta = read_refmod_meta(path)
+    if meta is None:
+        return {"has_visual": True, "has_audio": False}
+    caps = refmod_capabilities(meta)
+    return {
+        "has_visual": bool(caps.get("has_visual", False)),
+        "has_audio": bool(caps.get("has_audio", False)),
+    }
 
 
 def _normalize_weight(weight: float) -> float:
@@ -144,9 +166,13 @@ class H3RefModLoader:
                 "mod": (_list_mod_names(), {"tooltip": "The RefMod to load."}),
                 "weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": _MAX_WEIGHT, "step": 0.01,
                     "display": "number",
-                    "tooltip": "Unified weight control. 0 skips the mod. 0..1 behaves like the old "
-                               "strength control. Values above 1 repeat the same RefMod as extra "
-                               "copies: for example 2.7 becomes two full copies plus one 0.7 copy."}),
+                    "tooltip": "Legacy unified weight control kept for workflow compatibility. New graphs should use video_weight and audio_weight."}),
+                "video_weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": _MAX_WEIGHT, "step": 0.01,
+                    "display": "number",
+                    "tooltip": "Unified video weight control. 0 skips video. 0..1 behaves like the old strength control. Values above 1 repeat the same visual RefMod as extra copies."}),
+                "audio_weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": _MAX_WEIGHT, "step": 0.01,
+                    "display": "number",
+                    "tooltip": "Unified audio weight control. 0 skips audio. 0..1 behaves like the old strength control. Values above 1 repeat the same audio RefMod as extra copies."}),
             },
             "optional": {
                 "mods": ("H3_REF_MODS",),
@@ -161,19 +187,28 @@ class H3RefModLoader:
     @classmethod
     def VALIDATE_INPUTS(cls, mod, **kwargs):
         if mod not in set(_list_mod_names()):
-            return f"RefMod '{mod}' not found in mods/. Run Extract H3 RefMod first."
+            return f"RefMod '{mod}' not found in models/refmods/. Run Create H3 RefMod first."
         return True
 
-    def load(self, mod, weight=1.0, mods=None, strength=None):
+    def load(self, mod, weight=1.0, video_weight=1.0, audio_weight=1.0, mods=None, strength=None, audio_strength=None):
         rows = list(mods) if mods is not None else []
-        m = _load_mod(mod)
         if strength is not None:
             weight = strength
-        clipped = _append_weighted_mod(rows, m, weight)
-        print(f"[H3RefModLoader] {m.name} weight={clipped:.2f} -> {_weight_display(clipped)}")
+        if audio_strength is not None:
+            audio_weight = audio_strength
+        if strength is not None or (weight != 1.0 and video_weight == 1.0 and audio_weight == 1.0):
+            video_weight = weight
+            audio_weight = weight
+        loaded = _load_mods(mod)
+        summaries = []
         hint_rows = list(mods) if mods is not None else []
-        if clipped > 0.0:
-            hint_rows.append((m, min(1.0, clipped)))
+        for item in loaded:
+            current_weight = audio_weight if item.kind == "audio" else video_weight
+            clipped = _append_weighted_mod(rows, item, current_weight)
+            summaries.append(f"{item.name}({_weight_display(clipped)})")
+            if clipped > 0.0:
+                hint_rows.append((item, min(1.0, clipped)))
+        print(f"[H3RefModLoader] {mod}: " + ", ".join(summaries))
         hint = _prompt_hint(hint_rows)
         if hint:
             print(f"[H3RefModLoader] prompt_hint: {hint}")
@@ -185,5 +220,17 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "H3RefModLoader": "Load H3 RefMod"
+    "H3RefModLoader": "Load H3 RefMod Simple"
 }
+
+
+@server.PromptServer.instance.routes.get("/h3refmods/refmod-loader/capabilities")
+async def refmod_loader_capabilities(request):
+    try:
+        name = str(request.query.get("mod", "") or "").strip()
+        if not name:
+            return server.web.json_response({"ok": True, "has_visual": True, "has_audio": True})
+        caps = _mod_capabilities(name)
+        return server.web.json_response({"ok": True, **caps})
+    except Exception as exc:
+        return server.web.json_response({"ok": False, "error": str(exc)}, status=500)

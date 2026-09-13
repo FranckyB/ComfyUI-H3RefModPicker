@@ -4,13 +4,15 @@ import os
 from typing import Dict, List, Optional
 
 from .refmod_common import refmods_dir
-from .refmod_core import read_refmod_meta
+from .refmod_core import read_refmod_meta, refmod_capabilities
 
 
 PREVIEW_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 HIDDEN_BROWSER_DIRS = {"graph_presets"}
-VISUAL_SUFFIXES = ("_Video", "_Visual")
-AUDIO_SUFFIXES = ("_Audio",)
+VISUAL_SUFFIXES = ("_visual", "_video")
+AUDIO_SUFFIXES = ("_audio",)
+VISUAL_FILE_SUFFIXES = ("_visual", "_Visual", "_video", "_Video")
+AUDIO_FILE_SUFFIXES = ("_audio", "_Audio")
 
 
 def browser_root() -> str:
@@ -55,10 +57,10 @@ def _strip_known_suffix(path_no_ext: str) -> tuple[str, str | None, str | None]:
     name = os.path.basename(path_no_ext)
     lower_name = name.lower()
     for suffix in VISUAL_SUFFIXES:
-        if lower_name.endswith(suffix.lower()):
+        if lower_name.endswith(suffix):
             return (path_no_ext[:-len(suffix)], "visual", suffix)
     for suffix in AUDIO_SUFFIXES:
-        if lower_name.endswith(suffix.lower()):
+        if lower_name.endswith(suffix):
             return (path_no_ext[:-len(suffix)], "audio", suffix)
     return (path_no_ext, None, None)
 
@@ -67,10 +69,11 @@ def paired_mod_path(path_no_ext: str, target_kind: str) -> Optional[str]:
     base, current_kind, _suffix = _strip_known_suffix(path_no_ext)
     if current_kind is None:
         return None
-    suffixes = VISUAL_SUFFIXES if target_kind == "visual" else AUDIO_SUFFIXES
+    current_path = path_no_ext + ".safetensors"
+    suffixes = VISUAL_FILE_SUFFIXES if target_kind == "visual" else AUDIO_FILE_SUFFIXES
     for suffix in suffixes:
         candidate = base + suffix + ".safetensors"
-        if os.path.isfile(candidate):
+        if candidate != current_path and os.path.isfile(candidate):
             return candidate
     return None
 
@@ -101,16 +104,32 @@ def _mod_entry(path: str) -> Optional[Dict]:
         return None
     path_no_ext = path[:-len(".safetensors")]
     meta = read_refmod_meta(path_no_ext)
-    if meta is None or meta.get("kind") not in ("image", "video", "audio"):
+    if meta is None:
         return None
-    _base, kind, _suffix = _strip_known_suffix(path_no_ext)
-    if kind == "audio" and paired_mod_path(path_no_ext, "visual"):
+    caps = refmod_capabilities(meta)
+    meta_kind = str(caps.get("kind", "") or "")
+    if meta_kind not in ("image", "video", "audio", "bundle"):
         return None
-    preview = _find_preview(path_no_ext)
+    _base, paired_kind, _suffix = _strip_known_suffix(path_no_ext)
+    paired_visual = paired_mod_path(path_no_ext, "visual")
+    paired_audio = paired_mod_path(path_no_ext, "audio")
+    paired_split = bool(paired_visual or paired_audio)
+    if paired_kind == "audio" and paired_visual:
+        return None
+    has_visual = bool(caps.get("has_visual", False))
+    has_audio = bool(caps.get("has_audio", False))
+    if paired_split:
+        has_visual = True
+        has_audio = True
+    preview = _find_preview(path_no_ext) if has_visual else None
     return {
         "name": _display_mod_name(path_no_ext) + ".safetensors",
         "path": path,
         "preview_path": preview,
+        "kind": meta_kind or "unknown",
+        "has_visual": has_visual,
+        "has_audio": has_audio,
+        "paired_split": paired_split,
         "concept_type": str(meta.get("concept_type", "generic") or "generic"),
         "description": str(meta.get("description", "") or ""),
     }

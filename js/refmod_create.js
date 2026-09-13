@@ -2,7 +2,6 @@ import { app } from "../../scripts/app.js";
 
 const TARGET_NODES = new Set([
     "H3RefModCreateFromFolder",
-    "H3RefModCreateFromInputs",
 ]);
 
 const MIN_NODE_WIDTH = 320;
@@ -30,7 +29,30 @@ const COMMON_PRESET_FIELDS = [
 
 const PRESET_CONFIG = {
     H3RefModCreateFromFolder: {
-        manual: { values: {}, fields: [] },
+        manual: {
+            values: {
+                concept_type: "identity",
+                audio_concept_type: "voice",
+                mode: "Full Reference",
+                ref_resolution: 1024,
+                pool_h: 16,
+                pool_w: 16,
+                latent_frames: 16,
+                max_tokens: 8192,
+                identity: 500,
+                merge: false,
+                motion_only: false,
+                multiplier: 1,
+                max_frames: 240,
+                audio_max_seconds: 30.0,
+                audio_max_tokens: 5120,
+                audio_budget_policy: "error",
+                max_total_tokens: 0,
+                budget_policy: "truncate",
+            },
+            fields: [],
+            compactFields: [],
+        },
         identity_encode: {
             values: {
                 concept_type: "identity",
@@ -52,7 +74,16 @@ const PRESET_CONFIG = {
                 max_total_tokens: 0,
                 budget_policy: "truncate",
             },
-            fields: COMMON_PRESET_FIELDS,
+            fields: [
+                "concept_type",
+                "audio_concept_type",
+                "mode",
+                "ref_resolution",
+                "identity",
+                "merge",
+                "motion_only",
+            ],
+            compactFields: COMMON_PRESET_FIELDS,
         },
         style_experimental: {
             values: {
@@ -75,7 +106,17 @@ const PRESET_CONFIG = {
                 max_total_tokens: 0,
                 budget_policy: "truncate",
             },
-            fields: COMMON_PRESET_FIELDS,
+            fields: [
+                "concept_type",
+                "audio_concept_type",
+                "mode",
+                "pool_h",
+                "pool_w",
+                "identity",
+                "merge",
+                "motion_only",
+            ],
+            compactFields: COMMON_PRESET_FIELDS,
         },
         motion_sequence: {
             values: {
@@ -98,76 +139,16 @@ const PRESET_CONFIG = {
                 max_total_tokens: 0,
                 budget_policy: "truncate",
             },
-            fields: COMMON_PRESET_FIELDS,
-        },
-    },
-    H3RefModCreateFromInputs: {
-        manual: { values: {}, fields: [] },
-        identity_encode: {
-            values: {
-                concept_type: "identity",
-                audio_concept_type: "voice",
-                mode: "Full Reference",
-                ref_resolution: 1024,
-                pool_h: 16,
-                pool_w: 16,
-                latent_frames: 16,
-                max_tokens: 5120,
-                identity: 0,
-                merge: false,
-                motion_only: false,
-                multiplier: 1,
-                audio_max_seconds: 30.0,
-                audio_max_tokens: 5120,
-                audio_budget_policy: "error",
-                max_total_tokens: 0,
-                budget_policy: "truncate",
-            },
-            fields: COMMON_PRESET_FIELDS.filter((name) => name !== "max_frames"),
-        },
-        style_experimental: {
-            values: {
-                concept_type: "style",
-                audio_concept_type: "voice",
-                mode: "Compressed Reference",
-                ref_resolution: 1024,
-                pool_h: 8,
-                pool_w: 8,
-                latent_frames: 16,
-                max_tokens: 5120,
-                identity: 150,
-                merge: false,
-                motion_only: false,
-                multiplier: 1,
-                audio_max_seconds: 30.0,
-                audio_max_tokens: 5120,
-                audio_budget_policy: "error",
-                max_total_tokens: 0,
-                budget_policy: "truncate",
-            },
-            fields: COMMON_PRESET_FIELDS.filter((name) => name !== "max_frames"),
-        },
-        motion_sequence: {
-            values: {
-                concept_type: "pose_motion",
-                audio_concept_type: "voice",
-                mode: "Compressed Reference",
-                ref_resolution: 1024,
-                pool_h: 16,
-                pool_w: 16,
-                latent_frames: 16,
-                max_tokens: 5120,
-                identity: 500,
-                merge: false,
-                motion_only: false,
-                multiplier: 1,
-                audio_max_seconds: 30.0,
-                audio_max_tokens: 5120,
-                audio_budget_policy: "error",
-                max_total_tokens: 0,
-                budget_policy: "truncate",
-            },
-            fields: COMMON_PRESET_FIELDS.filter((name) => name !== "max_frames"),
+            fields: [
+                "concept_type",
+                "audio_concept_type",
+                "mode",
+                "pool_h",
+                "pool_w",
+                "merge",
+                "motion_only",
+            ],
+            compactFields: COMMON_PRESET_FIELDS,
         },
     },
 };
@@ -230,7 +211,8 @@ function syncPresetValues(node) {
     const presetWidget = findWidget(node, "extraction_preset");
     const preset = String(presetWidget?.value || "manual");
     const nodeType = String(node.comfyClass || "");
-    const nodePresets = PRESET_CONFIG[nodeType] || PRESET_CONFIG.H3RefModCreateFromInputs;
+    const nodePresets = PRESET_CONFIG[nodeType];
+    if (!nodePresets) return;
     const config = nodePresets[preset] || nodePresets.manual;
     for (const [name, value] of Object.entries(config.values)) {
         const widget = findWidget(node, name);
@@ -259,14 +241,22 @@ function applyFolderNamingVisibility(node) {
 
 function applyPresetVisibility(node) {
     const presetWidget = findWidget(node, "extraction_preset");
+    const advancedWidget = findWidget(node, "advanced");
     const preset = String(presetWidget?.value || "manual");
+    const advanced = Boolean(advancedWidget?.value);
     const nodeType = String(node.comfyClass || "");
-    const nodePresets = PRESET_CONFIG[nodeType] || PRESET_CONFIG.H3RefModCreateFromInputs;
-    const active = new Set((nodePresets[preset] || nodePresets.manual).fields);
-    const known = new Set(Object.values(nodePresets).flatMap((config) => config.fields));
+    const nodePresets = PRESET_CONFIG[nodeType];
+    if (!nodePresets) return;
+    const config = nodePresets[preset] || nodePresets.manual;
+    const active = new Set(advanced ? config.fields : (config.compactFields || config.fields));
+    const known = new Set(Object.values(nodePresets).flatMap((configEntry) => [
+        ...(configEntry.fields || []),
+        ...(configEntry.compactFields || []),
+    ]));
     for (const name of known) {
         setWidgetVisible(findWidget(node, name), !(preset !== "manual" && active.has(name)));
     }
+    setWidgetVisible(advancedWidget, preset !== "manual");
     applyFolderNamingVisibility(node);
     refreshNodeLayout(node);
 }
@@ -296,6 +286,7 @@ function enhanceCreateNode(node) {
     };
 
     moveWidgetAfter(node, "extraction_preset", "name");
+    moveWidgetAfter(node, "advanced", "extraction_preset");
     moveWidgetAfter(node, "budget_policy", "max_total_tokens");
     syncPresetValues(node);
     applyPresetVisibility(node);
@@ -304,6 +295,7 @@ function enhanceCreateNode(node) {
         syncPresetValues(node);
         applyPresetVisibility(node);
     });
+    attachWidgetRefresh(node, "advanced", () => applyPresetVisibility(node));
     attachWidgetRefresh(node, "use_subfolders", () => applyPresetVisibility(node));
     attachWidgetRefresh(node, "use_folder_as_name", () => applyPresetVisibility(node));
 
@@ -311,6 +303,7 @@ function enhanceCreateNode(node) {
     node.onConfigure = function () {
         const result = onConfigure?.apply(this, arguments);
         moveWidgetAfter(this, "extraction_preset", "name");
+        moveWidgetAfter(this, "advanced", "extraction_preset");
         moveWidgetAfter(this, "budget_policy", "max_total_tokens");
         syncPresetValues(this);
         applyPresetVisibility(this);
@@ -318,6 +311,7 @@ function enhanceCreateNode(node) {
             syncPresetValues(this);
             applyPresetVisibility(this);
         });
+        attachWidgetRefresh(this, "advanced", () => applyPresetVisibility(this));
         attachWidgetRefresh(this, "use_subfolders", () => applyPresetVisibility(this));
         attachWidgetRefresh(this, "use_folder_as_name", () => applyPresetVisibility(this));
         return result;
