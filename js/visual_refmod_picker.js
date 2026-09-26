@@ -131,6 +131,41 @@ function normalizeSelectedModPath(value) {
     return path && path.toLowerCase() !== "(none)" ? path : "";
 }
 
+function normalizeFsPath(value) {
+    return String(value || "").trim().replace(/\\/g, "/").replace(/\/+/g, "/");
+}
+
+function isAbsoluteFsPath(value) {
+    return /^(?:[a-zA-Z]:\/|\/)/.test(normalizeFsPath(value));
+}
+
+function relativePathFromRoot(path, root) {
+    const normalizedPath = normalizeFsPath(path);
+    const normalizedRoot = normalizeFsPath(root).replace(/\/+$/, "");
+    if (!normalizedPath) return "";
+    if (!normalizedRoot || !isAbsoluteFsPath(normalizedPath)) return normalizedPath;
+    const lowerPath = normalizedPath.toLowerCase();
+    const lowerRoot = normalizedRoot.toLowerCase();
+    if (lowerPath === lowerRoot) return "";
+    if (lowerPath.startsWith(`${lowerRoot}/`)) {
+        return normalizedPath.substring(normalizedRoot.length + 1);
+    }
+    return normalizedPath;
+}
+
+function displayPathFromRoot(path, root) {
+    const relativePath = relativePathFromRoot(path, root);
+    return relativePath || "/";
+}
+
+function resolvePathFromRoot(path, root) {
+    const normalizedPath = normalizeFsPath(path);
+    const normalizedRoot = normalizeFsPath(root).replace(/\/+$/, "");
+    if (!normalizedPath) return "";
+    if (!normalizedRoot || isAbsoluteFsPath(normalizedPath)) return normalizedPath;
+    return `${normalizedRoot}/${normalizedPath}`.replace(/\/+/g, "/");
+}
+
 function buildPreviewUrl(path) {
     if (!path) return PLACEHOLDER_IMAGE_PATH;
     return api.apiURL(`/h3refmods/refmod-browser/file?path=${encodeURIComponent(path)}`);
@@ -524,7 +559,10 @@ function createRefModBrowserModal(initialPath, onSelect) {
             state.currentPath = data.current_path || path || state.currentPath;
             state.parentPath = data.parent_path || null;
             state.selectedPath = null;
-            pathLabel.textContent = state.currentPath || state.root || "models/refmods";
+            pathLabel.textContent = displayPathFromRoot(
+                state.currentPath || state.root,
+                state.root
+            );
             upButton.disabled = !state.parentPath;
             countsLabel.textContent = `${(data.dirs || []).length} folder(s), ${(data.mods || []).length} RefMod(s)`;
 
@@ -878,13 +916,15 @@ app.registerExtension({
 
             const setSelection = (entry) => {
                 const selected = entry && entry.path ? entry : null;
-                const value = selected?.path || "";
-                if (modPathWidget) modPathWidget.value = value;
-                const label = Object.keys(node._vrpModMap || {}).find((key) => node._vrpModMap[key]?.path === value);
+                const rootPath = node._vrpRoot || "";
+                const absoluteValue = selected?.path || "";
+                const storedValue = relativePathFromRoot(absoluteValue, rootPath);
+                if (modPathWidget) modPathWidget.value = storedValue;
+                const label = Object.keys(node._vrpModMap || {}).find((key) => pathsEqual(node._vrpModMap[key]?.path, absoluteValue));
                 if (filePickerWidget) filePickerWidget.value = label || "(none)";
-                node.properties._vrpModPath = value;
-                node.properties._vrpModDir = selected?.path ? dirnameForPath(selected.path) : (node.properties._vrpModDir || "");
-                node.properties._vrpPreviewPath = selected?.preview_path || "";
+                node.properties._vrpModPath = storedValue;
+                node.properties._vrpModDir = selected?.path ? dirnameForPath(storedValue) : (node.properties._vrpModDir || "");
+                node.properties._vrpPreviewPath = relativePathFromRoot(selected?.preview_path || "", rootPath);
                 node.properties._vrpPairedSplit = Boolean(selected?.paired_split);
                 node.properties._vrpHasVisual = selected ? entryHasVisual(selected) : true;
                 node.properties._vrpHasAudio = selected ? entryHasAudio(selected) : true;
@@ -895,6 +935,7 @@ app.registerExtension({
             const refreshPickerOptions = async (folderPath, preferredPath = null) => {
                 if (!folderPath) return;
                 const data = await listBrowserFolder(folderPath);
+                node._vrpRoot = data.root || node._vrpRoot || "";
                 const labels = ["(none)"];
                 const map = { "(none)": null };
                 const used = new Set(labels);
@@ -912,17 +953,24 @@ app.registerExtension({
                 node._vrpModMap = map;
                 if (filePickerWidget) filePickerWidget.options.values = labels;
                 const desiredPath = preferredPath != null ? preferredPath : (modPathWidget?.value || "");
-                const desiredLabel = Object.keys(map).find((key) => map[key]?.path === desiredPath);
+                const desiredAbsolutePath = resolvePathFromRoot(desiredPath, node._vrpRoot || data.root || "");
+                const desiredLabel = Object.keys(map).find((key) => pathsEqual(map[key]?.path, desiredAbsolutePath));
                 if (filePickerWidget) filePickerWidget.value = desiredLabel || "(none)";
                 return desiredLabel ? map[desiredLabel] : null;
             };
 
             const openBrowser = async () => {
                 const root = await getRefModsRoot();
+                node._vrpRoot = root || node._vrpRoot || "";
                 const current = node.properties?._vrpModPath || modPathWidget?.value || "";
-                const initialPath = node.properties?._vrpModDir || dirnameForPath(current) || root;
+                const initialPath = resolvePathFromRoot(
+                    node.properties?._vrpModDir || dirnameForPath(current),
+                    node._vrpRoot || root
+                ) || root;
                 createRefModBrowserModal(initialPath, async (selected) => {
-                    node.properties._vrpModDir = dirnameForPath(selected.path);
+                    node.properties._vrpModDir = dirnameForPath(
+                        relativePathFromRoot(selected.path, node._vrpRoot || root)
+                    );
                     setSelection(selected);
                     await refreshPickerOptions(node.properties._vrpModDir, selected.path);
                 });
@@ -1012,16 +1060,18 @@ app.registerExtension({
 
             const originalSerialize = node.serialize;
             node.serialize = function () {
+                const rootPath = node._vrpRoot || "";
                 const serializedModPath = normalizeSelectedModPath(
-                    node.properties?._vrpModPath || modPathWidget?.value || ""
+                    relativePathFromRoot(node.properties?._vrpModPath || modPathWidget?.value || "", rootPath)
                 );
                 if (modPathWidget) {
                     modPathWidget.value = serializedModPath;
                 }
                 node.properties._vrpModPath = serializedModPath;
                 if (serializedModPath) {
-                    node.properties._vrpModDir = node.properties?._vrpModDir || dirnameForPath(serializedModPath);
+                    node.properties._vrpModDir = dirnameForPath(serializedModPath);
                 }
+                node.properties._vrpPreviewPath = relativePathFromRoot(node.properties?._vrpPreviewPath || "", rootPath);
                 if (strengthWidget && numericStrengthWidget) {
                     strengthWidget.value = normalizedStrengthValue(
                         numericStrengthWidget.value,

@@ -25,6 +25,17 @@ def _safe_abspath(path: str) -> str:
     return os.path.abspath(os.path.expanduser(path))
 
 
+def _resolve_browser_path(path: str) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return browser_root()
+    expanded = os.path.expanduser(raw)
+    if os.path.isabs(expanded):
+        return os.path.abspath(expanded)
+    normalized = raw.replace("\\", os.sep).replace("/", os.sep)
+    return os.path.abspath(os.path.join(browser_root(), normalized))
+
+
 def _is_under_root(path: str) -> bool:
     root = os.path.realpath(browser_root())
     current = os.path.realpath(_safe_abspath(path))
@@ -34,7 +45,7 @@ def _is_under_root(path: str) -> bool:
 def safe_dir_path(path: str = "") -> str:
     if not path:
         return browser_root()
-    current = _safe_abspath(path)
+    current = _resolve_browser_path(path)
     if not _is_under_root(current):
         raise ValueError("Path is outside models/refmods")
     if not os.path.isdir(current):
@@ -45,7 +56,7 @@ def safe_dir_path(path: str = "") -> str:
 def safe_file_path(path: str) -> str:
     if not path:
         raise ValueError("Missing path")
-    current = _safe_abspath(path)
+    current = _resolve_browser_path(path)
     if not _is_under_root(current):
         raise ValueError("Path is outside models/refmods")
     if not os.path.isfile(current):
