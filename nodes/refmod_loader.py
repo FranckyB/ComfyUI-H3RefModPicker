@@ -18,12 +18,15 @@ from ..py.refmod_common import (
 
 from ..py.refmod_common import (
     refmods_dir,
+    refmods_dirs,
 )
 
 _MOD_CACHE: Dict[str, Tuple[H3RefMod, ...]] = {}
 _MOD_CACHE_MAX = 24            # cap: never pin more mods in RAM than this (FIFO eviction)
 _MOD_LIST_CACHE_KEY = None     # (dirs, mtimes, sizes) signature of the last _list_mod_names() scan
 _MOD_LIST_CACHE_VAL = None
+_MOD_PATH_CACHE_KEY = None
+_MOD_PATH_CACHE_VAL: Dict[str, str] = {}
 _MOD_SKIP_DIRS = {"graph_presets", ".git", "__pycache__"}
 _MAX_WEIGHT = 10.0
 
@@ -51,6 +54,69 @@ def _iter_mod_paths(base_dir: str):
             yield rel_stem, abs_stem
 
 
+def _mod_scan_signature() -> tuple[str, List[str]]:
+    mods_dirs = refmods_dirs()
+    sig = []
+    for mods_dir in mods_dirs:
+        for rel_stem, abs_stem in _iter_mod_paths(mods_dir):
+            try:
+                st = os.stat(abs_stem + ".safetensors")
+                sig.append(f"{mods_dir}:{rel_stem}:{st.st_size}:{int(st.st_mtime)}")
+            except OSError:
+                pass
+    return "\n".join(sig), mods_dirs
+
+
+def _root_display_labels(roots: List[str]) -> List[str]:
+    labels: List[str] = []
+    counts: Dict[str, int] = {}
+    for index, root in enumerate(roots, start=1):
+        base = os.path.basename(os.path.normpath(root)) or f"root{index}"
+        count = counts.get(base, 0) + 1
+        counts[base] = count
+        labels.append(base if count == 1 else f"{base}#{count}")
+    return labels
+
+
+def _refresh_mod_lookup() -> Dict[str, str]:
+    global _MOD_LIST_CACHE_KEY, _MOD_LIST_CACHE_VAL, _MOD_PATH_CACHE_KEY, _MOD_PATH_CACHE_VAL
+
+    key, mods_dirs = _mod_scan_signature()
+    if key == _MOD_LIST_CACHE_KEY and key == _MOD_PATH_CACHE_KEY and _MOD_LIST_CACHE_VAL is not None:
+        return _MOD_PATH_CACHE_VAL
+
+    names_by_rel: Dict[str, List[Tuple[int, str]]] = {}
+    for index, mods_dir in enumerate(mods_dirs):
+        for rel_stem, abs_stem in _iter_mod_paths(mods_dir):
+            meta = read_refmod_meta(abs_stem)
+            if meta is None or meta.get("kind") not in ("image", "video", "audio", "bundle"):
+                continue
+            names_by_rel.setdefault(rel_stem, []).append((index, abs_stem))
+
+    labels = _root_display_labels(mods_dirs)
+    lookup: Dict[str, str] = {}
+    names: List[str] = []
+    for rel_stem in sorted(names_by_rel, key=str.lower):
+        matches = names_by_rel[rel_stem]
+        first_index, first_path = matches[0]
+        lookup[rel_stem] = first_path
+        names.append(rel_stem)
+        for dup_index, dup_path in matches[1:]:
+            display_name = f"[{labels[dup_index]}] {rel_stem}"
+            suffix = 2
+            while display_name in lookup:
+                display_name = f"[{labels[dup_index]} #{suffix}] {rel_stem}"
+                suffix += 1
+            lookup[display_name] = dup_path
+            names.append(display_name)
+
+    _MOD_LIST_CACHE_KEY = key
+    _MOD_LIST_CACHE_VAL = names
+    _MOD_PATH_CACHE_KEY = key
+    _MOD_PATH_CACHE_VAL = lookup
+    return lookup
+
+
 def _list_mod_names() -> List[str]:
     """Available RefMod names across the search dirs (for the loader dropdown).
 
@@ -62,37 +128,18 @@ def _list_mod_names() -> List[str]:
     result is cached until any mod file appears/disappears/changes (checked
     via cheap os.stat, not by re-reading every safetensors header).
     """
-    global _MOD_LIST_CACHE_KEY, _MOD_LIST_CACHE_VAL
-    mods_dir = refmods_dir()
-    sig = []
-    if os.path.isdir(mods_dir):
-        for rel_stem, abs_stem in _iter_mod_paths(mods_dir):
-            try:
-                st = os.stat(abs_stem + ".safetensors")
-                sig.append(f"{mods_dir}:{rel_stem}:{st.st_size}:{int(st.st_mtime)}")
-            except OSError:
-                pass
-    key = "\n".join(sig)
-    if key == _MOD_LIST_CACHE_KEY:
-        return _MOD_LIST_CACHE_VAL
-    names = set()
-    if os.path.isdir(mods_dir):
-        for rel_stem, abs_stem in _iter_mod_paths(mods_dir):
-            meta = read_refmod_meta(abs_stem)
-            if meta is not None and meta.get("kind") in ("image", "video", "audio", "bundle"):
-                names.add(rel_stem)
-    _MOD_LIST_CACHE_KEY, _MOD_LIST_CACHE_VAL = key, sorted(names)
+    _refresh_mod_lookup()
     return _MOD_LIST_CACHE_VAL
 
 
 def _find_mod_path(name: str) -> str:
-    mods_dir = refmods_dir()
-    p = os.path.join(mods_dir, name)
-    if os.path.isfile(p + ".safetensors"):
-        return p
+    lookup = _refresh_mod_lookup()
+    if name in lookup:
+        return lookup[name]
+    mods_dirs = refmods_dirs()
     raise FileNotFoundError(
         f"RefMod '{name}' not found. Searched:\n" +
-        f"  - {mods_dir}/{name}.safetensors")
+        "\n".join(f"  - {d}/{name}.safetensors" for d in mods_dirs))
 
 
 def _load_mods(name: str) -> List[H3RefMod]:
@@ -187,7 +234,7 @@ class H3RefModLoader:
     @classmethod
     def VALIDATE_INPUTS(cls, mod, **kwargs):
         if mod not in set(_list_mod_names()):
-            return f"RefMod '{mod}' not found in models/refmods/. Run Create H3 RefMod first."
+            return f"RefMod '{mod}' not found in any configured refmods folder. Run Create H3 RefMod first."
         return True
 
     def load(self, mod, weight=1.0, video_weight=1.0, audio_weight=1.0, mods=None, strength=None, audio_strength=None):

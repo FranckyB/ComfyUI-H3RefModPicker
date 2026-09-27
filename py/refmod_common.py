@@ -23,6 +23,34 @@ def refmods_dir() -> str:
     return d
 
 
+def refmods_dirs() -> List[str]:
+    """All RefMod folders ComfyUI knows about, write folder first.
+
+    Includes folders declared under ``refmods:`` in extra_model_paths.yaml
+    (or --extra-model-paths-config). Duplicates are removed by real path,
+    since a root may be a symlink to another one.
+    """
+    import folder_paths
+
+    candidates = [refmods_dir()]
+    try:
+        candidates += list(folder_paths.get_folder_paths("refmods"))
+    except Exception:
+        pass
+
+    roots: List[str] = []
+    seen = set()
+    for directory in candidates:
+        if not os.path.isdir(directory):
+            continue
+        real = os.path.realpath(directory)
+        if real in seen:
+            continue
+        seen.add(real)
+        roots.append(os.path.abspath(directory))
+    return roots
+
+
 def list_media_files(folder: str) -> Tuple[List[str], List[str]]:
     """(images, videos) directly under ``folder`` (top level only), sorted by name."""
     images, videos = [], []

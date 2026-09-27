@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Optional
 
-from .refmod_common import refmods_dir
+from .refmod_common import refmods_dir, refmods_dirs
 from .refmod_core import read_refmod_meta, refmod_capabilities
 
 
@@ -21,6 +21,35 @@ def browser_root() -> str:
     return root
 
 
+def browser_roots() -> List[str]:
+    """Every declared RefMod folder; the first one is browser_root()."""
+    return refmods_dirs()
+
+
+def _browser_root_labels() -> Dict[str, str]:
+    labels: Dict[str, str] = {}
+    counts: Dict[str, int] = {}
+    for index, root in enumerate(browser_roots(), start=1):
+        base = os.path.basename(os.path.normpath(root)) or f"root{index}"
+        count = counts.get(base, 0) + 1
+        counts[base] = count
+        labels[os.path.realpath(root)] = base if count == 1 else f"{base}#{count}"
+    return labels
+
+
+def _is_root(path: str) -> bool:
+    real = os.path.realpath(_safe_abspath(path))
+    return any(real == os.path.realpath(root) for root in browser_roots())
+
+
+def _root_label_for_path(path: str) -> str:
+    current = os.path.realpath(_safe_abspath(path))
+    for root_real, label in _browser_root_labels().items():
+        if current == root_real or current.startswith(root_real + os.sep):
+            return label
+    return "refmods"
+
+
 def _safe_abspath(path: str) -> str:
     return os.path.abspath(os.path.expanduser(path))
 
@@ -33,13 +62,20 @@ def _resolve_browser_path(path: str) -> str:
     if os.path.isabs(expanded):
         return os.path.abspath(expanded)
     normalized = raw.replace("\\", os.sep).replace("/", os.sep)
+    for root in browser_roots():
+        candidate = os.path.abspath(os.path.join(root, normalized))
+        if os.path.exists(candidate):
+            return candidate
     return os.path.abspath(os.path.join(browser_root(), normalized))
 
 
 def _is_under_root(path: str) -> bool:
-    root = os.path.realpath(browser_root())
     current = os.path.realpath(_safe_abspath(path))
-    return current == root or current.startswith(root + os.sep)
+    for root_dir in browser_roots():
+        root = os.path.realpath(root_dir)
+        if current == root or current.startswith(root + os.sep):
+            return True
+    return False
 
 
 def safe_dir_path(path: str = "") -> str:
@@ -146,8 +182,7 @@ def _mod_entry(path: str) -> Optional[Dict]:
     }
 
 
-def list_browser_dir(path: str = "") -> Dict:
-    current = safe_dir_path(path)
+def _scan_dir(current: str) -> tuple[List[Dict], List[Dict]]:
     dirs: List[Dict] = []
     mods: List[Dict] = []
 
@@ -169,12 +204,46 @@ def list_browser_dir(path: str = "") -> Dict:
                     mods.append(item)
         except OSError:
             continue
+    return dirs, mods
+
+
+def _annotate_merged_duplicates(items: List[Dict]) -> None:
+    counts: Dict[str, int] = {}
+    for item in items:
+        key = str(item.get("name", "")).lower()
+        counts[key] = counts.get(key, 0) + 1
+    for item in items:
+        key = str(item.get("name", "")).lower()
+        if counts.get(key, 0) > 1:
+            item["name"] = f"{item['name']} [{_root_label_for_path(str(item.get('path', '')))}]"
+
+
+def list_browser_dir(path: str = "") -> Dict:
+    current = safe_dir_path(path)
+
+    if _is_root(current):
+        dirs: List[Dict] = []
+        mods: List[Dict] = []
+        for root in browser_roots():
+            root_dirs, root_mods = _scan_dir(root)
+            dirs.extend(root_dirs)
+            mods.extend(root_mods)
+        _annotate_merged_duplicates(dirs)
+        _annotate_merged_duplicates(mods)
+        current = browser_root()
+        parent_path = None
+    else:
+        dirs, mods = _scan_dir(current)
+        parent = os.path.dirname(current.rstrip("\\/"))
+        if parent and _is_root(parent):
+            parent_path = browser_root()
+        elif parent and _is_under_root(parent) and parent != current:
+            parent_path = parent
+        else:
+            parent_path = None
 
     dirs.sort(key=lambda item: item["name"].lower())
     mods.sort(key=lambda item: item["name"].lower())
-
-    parent = os.path.dirname(current.rstrip("\\/"))
-    parent_path = parent if parent and _is_under_root(parent) and parent != current else None
     return {
         "root": browser_root(),
         "current_path": current,
