@@ -549,14 +549,15 @@ function createRefModBrowserModal(initialPath, onSelect) {
     }
 
     async function loadFolder(path) {
+        const requestedPath = path || state.root;
         try {
             countsLabel.textContent = "Loading...";
             pathLabel.textContent = "";
             body.replaceChildren();
             state.items = [];
-            const data = await listBrowserFolder(path);
+            const data = await listBrowserFolder(requestedPath);
             state.root = data.root || state.root;
-            state.currentPath = data.current_path || path || state.currentPath;
+            state.currentPath = data.current_path || requestedPath || state.currentPath;
             state.parentPath = data.parent_path || null;
             state.selectedPath = null;
             pathLabel.textContent = displayPathFromRoot(
@@ -584,6 +585,13 @@ function createRefModBrowserModal(initialPath, onSelect) {
             }
             updateVisibleItems();
         } catch (err) {
+            const rootPath = state.root || await getRefModsRoot();
+            if (rootPath && requestedPath && !pathsEqual(requestedPath, rootPath)) {
+                console.warn("[VisualRefModPicker] Browser folder missing, falling back to refmods root:", requestedPath, err);
+                state.root = rootPath;
+                await loadFolder(rootPath);
+                return;
+            }
             countsLabel.textContent = err?.message || "Could not load RefMods.";
             pathLabel.textContent = "";
         }
