@@ -933,9 +933,33 @@ app.registerExtension({
             };
 
             const refreshPickerOptions = async (folderPath, preferredPath = null) => {
-                if (!folderPath) return;
-                const data = await listBrowserFolder(folderPath);
+                let requestedFolderPath = folderPath || "";
+                let fallbackRoot = node._vrpRoot || await getRefModsRoot();
+                if (!requestedFolderPath) {
+                    requestedFolderPath = fallbackRoot;
+                }
+                if (!requestedFolderPath) return;
+
+                let data;
+                try {
+                    data = await listBrowserFolder(requestedFolderPath);
+                } catch (err) {
+                    fallbackRoot = fallbackRoot || await getRefModsRoot();
+                    if (!fallbackRoot || pathsEqual(requestedFolderPath, fallbackRoot)) {
+                        throw err;
+                    }
+                    console.warn("[VisualRefModPicker] Restored folder missing, falling back to refmods root:", requestedFolderPath, err);
+                    requestedFolderPath = fallbackRoot;
+                    data = await listBrowserFolder(requestedFolderPath);
+                    node.properties._vrpModDir = "";
+                }
+
                 node._vrpRoot = data.root || node._vrpRoot || "";
+                if (pathsEqual(requestedFolderPath, node._vrpRoot || "")) {
+                    node.properties._vrpModDir = "";
+                } else {
+                    node.properties._vrpModDir = relativePathFromRoot(requestedFolderPath, node._vrpRoot || data.root || "");
+                }
                 const labels = ["(none)"];
                 const map = { "(none)": null };
                 const used = new Set(labels);
