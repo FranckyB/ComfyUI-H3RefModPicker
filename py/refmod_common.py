@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import os
+import random
 from typing import List, Optional, Tuple
 
 import torch
@@ -83,87 +85,104 @@ def load_image_file(path: str, max_edge: Optional[int] = None) -> torch.Tensor:
     return arr.unsqueeze(0)  # [1, H, W, 3]
 
 
+def _sample_video_frames(frames, total, max_frames, prepare):
+    """Keep at most max_frames; convert only retained frames, before buffering."""
+    import numpy as np
+    known = math.isfinite(total) and total > 0
+    total = int(total) if known else 0
+    targets = None
+    if total > max_frames:
+        targets = {round(i * (total - 1) / max(1, max_frames - 1)) for i in range(max_frames)}
+    kept = []
+    rng = random.Random(0)
+    for index, frame in enumerate(frames):
+        if targets is not None and index not in targets:
+            continue
+        slot = len(kept) if len(kept) < max_frames else rng.randrange(index + 1)
+        if slot >= max_frames:
+            continue
+        item = (index, np.array(prepare(frame), copy=True))
+        if slot == len(kept):
+            kept.append(item)
+        else:
+            kept[slot] = item
+        if targets is not None and len(kept) == len(targets):
+            break
+    if not kept:
+        raise ValueError("Video contains no decodable frames.")
+    kept.sort(key=lambda item: item[0])
+    shape = kept[0][1].shape
+    result = torch.empty((len(kept), *shape), dtype=torch.float32, device="cpu")
+    for index, (_, frame) in enumerate(kept):
+        if frame.shape != shape:
+            raise ValueError("Video frame dimensions change during the clip.")
+        result[index].copy_(torch.from_numpy(frame))
+    return result.div_(255.0)
+
+
+def _prepare_av_frame(frame, max_edge):
+    import numpy as np
+    from PIL import Image
+    rotation = frame.rotation
+    scale = min(1.0, max_edge / max(frame.width, frame.height)) if max_edge else 1.0
+    rgb = frame.reformat(width=max(1, round(frame.width * scale)),
+                         height=max(1, round(frame.height * scale)), format="rgb24").to_ndarray()
+    if rotation and rotation % 90 == 0:
+        return np.rot90(rgb, int(rotation // 90))
+    if rotation:
+        image = Image.fromarray(rgb).rotate(rotation, resample=Image.Resampling.BICUBIC, expand=True)
+        if max_edge:
+            image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+        return np.asarray(image)
+    return rgb
+
+
 def load_video_file(path: str, max_frames: int = 240,
                     max_edge: Optional[int] = None) -> torch.Tensor:
-    """Load one video file -> [T, H, W, 3] float32 in [0, 1].
+    """Load bounded RGB frames using ComfyUI's PyAV, then ImageIO/FFmpeg.
 
-    Uses opencv if available, else imageio. ``max_frames`` caps how many
-    frames are ever buffered (uniformly sampled for long videos, *during*
-    decode, not after), and ``max_edge`` downscales each frame — so a folder
-    of long high-res videos stays memory-bounded instead of decoding the
-    whole thing at native resolution first and OOM-ing ComfyUI.
+    Known-length clips are uniformly sampled; unknown lengths use a bounded,
+    deterministic reservoir. Every retained frame is resized before buffering.
     """
-    frames = None
+    if max_frames < 1:
+        raise ValueError("max_frames must be at least 1.")
+    if max_edge is not None and max_edge < 1:
+        raise ValueError("max_edge must be positive when provided.")
+    errors = []
     try:
-        import cv2
-        import numpy as np
-        cap = cv2.VideoCapture(path)
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        if total > max_frames:
-            # uniform target indices up front: skip frames while decoding so
-            # we never hold more than max_frames decoded frames at once
-            targets = set(np.linspace(0, total - 1, max_frames).round().astype(int).tolist())
-        else:
-            targets = None
-        out = []
-        idx = 0
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            if targets is not None and idx not in targets:
-                idx += 1
-                continue
-            idx += 1
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w = frame.shape[:2]
-            if max_edge is not None:
-                scale = min(1.0, max_edge / max(w, h))
-                if scale < 1.0:
-                    frame = cv2.resize(
-                        frame, (max(1, round(w * scale)), max(1, round(h * scale))),
-                        interpolation=cv2.INTER_LINEAR)
-            out.append(frame)
-        cap.release()
-        if out:
-            frames = torch.from_numpy(np.stack(out)).float() / 255.0
-    except Exception:
-        frames = None
-
-    if frames is None:
+        import av
+    except ImportError as exc:
+        errors.append(f"PyAV: {exc}")
+    else:
         try:
-            import imageio.v2 as imageio
-            import numpy as np
-            from PIL import Image
-            reader = imageio.get_reader(path)
-            out = []
-            for i, frame in enumerate(reader):
-                if max_frames and i >= max_frames:
-                    break
-                frame = np.asarray(frame)
-                h, w = frame.shape[:2]
-                if max_edge is not None:
-                    scale = min(1.0, max_edge / max(w, h))
-                    if scale < 1.0:
-                        frame = np.asarray(Image.fromarray(frame).resize(
-                            (max(1, round(w * scale)), max(1, round(h * scale))),
-                            Image.LANCZOS))
-                out.append(frame)
+            with av.open(path) as container:
+                if not container.streams.video:
+                    raise ValueError("File contains no video stream.")
+                stream = container.streams.video[0]
+                return _sample_video_frames(
+                    container.decode(stream), stream.frames or 0, max_frames,
+                    lambda frame: _prepare_av_frame(frame, max_edge))
+        except (av.error.FFmpegError, OSError, ValueError) as exc:
+            errors.append(f"PyAV: {exc}")
+    try:
+        import imageio.v2 as imageio
+        import numpy as np
+        from PIL import Image
+        reader = imageio.get_reader(path, format="FFMPEG")
+        try:
+            def prepare(frame):
+                image = Image.fromarray(np.asarray(frame)).convert("RGB")
+                if max_edge:
+                    image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+                return np.asarray(image)
+            total = reader.get_meta_data().get("nframes", 0) or 0
+            return _sample_video_frames(iter(reader), total, max_frames, prepare)
+        finally:
             reader.close()
-            if out:
-                frames = torch.from_numpy(np.stack(out)).float() / 255.0
-        except Exception:
-            frames = None
+    except (ImportError, OSError, ValueError) as exc:
+        errors.append(f"ImageIO/FFmpeg: {exc}")
+    raise RuntimeError(f"Cannot decode video '{path}': " + "; ".join(errors))
 
-    if frames is None:
-        raise RuntimeError(
-            f"No video loader available for {path} (tried opencv and imageio).")
-
-    n = frames.shape[0]
-    if n > max_frames:
-        idx = torch.linspace(0, n - 1, max_frames).round().long()
-        frames = frames[idx]
-    return frames
 
 def _prompt_hint(loads) -> str:
     """Merge loaded mods' concept_type + description into one prompt-ready string.

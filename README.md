@@ -57,4 +57,23 @@ To have the Visual Picker pick up a preview image, place the image beside the Re
 ```bash
 cd ComfyUI/custom_nodes
 git clone https://github.com/FranckyB/ComfyUI-H3RefModPicker
+cd ComfyUI-H3RefModPicker
+python -m pip install -r requirements.txt
 ```
+
+Use the same Python environment that runs ComfyUI, then restart ComfyUI.
+Video loading uses PyAV (already provided by current ComfyUI), with ImageIO
+and its FFmpeg backend as a fallback. Both are declared in `requirements.txt`;
+a separate OpenCV installation is not required. Cloning the repository alone
+does not install these dependencies.
+
+The loader applies video rotation metadata and downsizes retained frames before
+buffering. It keeps at most `max_frames`, including when frame-count metadata
+is missing, and reports the underlying decoder errors if both backends fail.
+
+### Video-loader tests
+
+Run `python tests/test_video_loading.py -v` with ComfyUI's Python environment.
+The tests generate tiny temporary H.264/10-bit HEVC clips; they do not load
+models or scan media folders. The rotation-metadata fixture requires PyAV
+18.1 or newer and is skipped on older versions.

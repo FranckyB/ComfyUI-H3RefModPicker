@@ -1,0 +1,4 @@
+# Primary video loader, also provided by current ComfyUI.
+av>=17.0.0
+# Separate-process FFmpeg fallback; no OpenCV installation is needed.
+imageio[ffmpeg]>=2.37.0
