@@ -19,3 +19,4 @@ Thumbs.db
 # Tooling
 .history/
 *.code-workspace
+test/

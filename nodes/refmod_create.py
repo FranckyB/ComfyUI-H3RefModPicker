@@ -32,10 +32,12 @@ from ..py.refmod_core import (
     normalize_mode,
     optimize_latent,
     optimize_latent_multi,
+    pack_encoder_images,
     pool_latent,
     save_refmod_bundle,
 )
 from ..py.refmod_vae_loader import load_h3_vaes_from_av_encoder
+from .refmods_to_video import _encoder_frames
 # reuse the encode helpers shared with the loader/mods-listing side of the pack
 from . import refmod_loader as _nodes_mod  # loader-side cache/list refresh
 from .refmod_loader import (
@@ -632,6 +634,7 @@ def _create_mod_from_folder(
     merge: bool = False,
     motion_only: bool = False,
     extraction_preset: str = "manual",
+    include_images: bool = False,
 ) -> List[Tuple[H3RefMod, float]]:
     """Create refs from one folder and optionally save them as split files or one bundle."""
     if budget_policy not in ("truncate", "error"):
@@ -917,23 +920,25 @@ def _create_mod_from_folder(
         )
         rows.append((audio_mod, 1.0))
     total_tokens = _check_total_token_budget(rows, max_total_tokens)
+    if include_images and visual_mod is not None:
+        encoder_frames, encoder_times, _source = _encoder_frames(visual_mod, vae, 24.0)
+        pack_encoder_images(visual_mod, encoder_frames, encoder_times)
     if save:
         if save_layout == "bundle":
             destination = save_refmod_bundle(bundle_path_no_ext, bundle_name, [mod for mod, _ in rows])
             _copy_refmod_thumbnail(images, bundle_path_no_ext)
-            for mod, _ in rows:
-                _MOD_CACHE[mod.name] = mod
+            _MOD_CACHE[bundle_name] = tuple(mod for mod, _ in rows)
             print(f"[CreateH3RefMod] saved bundle '{bundle_name}' with {len(rows)} member(s) -> {destination}")
         else:
             if visual_mod is not None:
                 visual_path = visual_mod.save(visual_path_no_ext)
                 _copy_refmod_thumbnail(images, visual_path_no_ext)
-                _MOD_CACHE[visual_mod.name] = visual_mod
+                _MOD_CACHE[visual_mod.name] = (visual_mod,)
                 print(f"[CreateH3RefMod] saved {_summarize(visual_mod)} -> {visual_path}")
             if include_audio:
                 audio_mod = rows[-1][0]
                 audio_path = audio_mod.save(audio_path_no_ext)
-                _MOD_CACHE[audio_mod.name] = audio_mod
+                _MOD_CACHE[audio_mod.name] = (audio_mod,)
                 print(f"[CreateH3RefMod] saved {_summarize(audio_mod)} -> {audio_path}")
         if len(_MOD_CACHE) > _MOD_CACHE_MAX:
             _MOD_CACHE.pop(next(iter(_MOD_CACHE)))
@@ -971,17 +976,14 @@ class H3RefModCreateFromFolder(io.ComfyNode):
             node_id="H3RefModCreateFromFolder",
             display_name="Create H3 RefMod From Folder",
             category="H3RefModPicker",
-            description="Scan a dataset folder for reference images/videos/audio and "
-                        "create a RefMod (.safetensors). Defaults to an 'identity' "
-                        "concept in 'Full Reference' mode — the right choice for a person/"
-                        "character. Audio files in the folder are embedded as the mod's "
-                        "voice (needs the audio VAE). Saves to models/refmods/ by default, "
-                        "and copies a thumbnail from the best source image.",
+            description="Create RefMods from a folder of images, video, and optional audio. "
+                        "Saves to models/refmods/ by default.",
             inputs=[
                 io.String.Input("folder", default="",
                     tooltip="Dataset folder with reference images/videos/audio. REQUIRED — "
                             "an absolute path, or a folder name inside ComfyUI's input/ "
-                            "directory. The node will NOT run if left empty."),
+                            "directory. The node will NOT run if left empty. "
+                            "! Use images with the same aspect ratio whenever possible."),
                 io.Boolean.Input("use_subfolders", default=False,
                     label_on="subfolders", label_off="single folder",
                     tooltip="When ON, the folder input is treated as a parent directory: "
@@ -1084,6 +1086,9 @@ class H3RefModCreateFromFolder(io.ComfyNode):
                     tooltip="Save the mod to disk so Load H3 RefMods can pick it up later."),
                 io.Combo.Input("save_layout", options=["bundle", "separate_files"], default="bundle",
                     tooltip="bundle (default) saves one single-file RefMod that can contain visual and audio members together. separate_files keeps the older *_Video and *_Audio files."),
+                io.Boolean.Input("include_images", default=False,
+                    tooltip="Save reconstructed pictures so RefMods to Video can visually ground prompt labels "
+                        "without decoding the latent again. Increases file size."),
             ],
             outputs=[
                 io.Custom("H3_REF_MODS").Output("mods",
@@ -1103,7 +1108,8 @@ class H3RefModCreateFromFolder(io.ComfyNode):
             audio_max_seconds=30.0, audio_max_tokens=5120,
             audio_budget_policy="error", max_total_tokens=0,
             description="", subfolder="", budget_policy="truncate",
-            save=True, save_layout="bundle", advanced=False, use_subfolders=False, save_dir="") -> io.NodeOutput:
+            save=True, save_layout="bundle", advanced=False, use_subfolders=False, save_dir="",
+            include_images=False) -> io.NodeOutput:
         del advanced
         del save_dir
         raw_folder = (folder or "").strip().strip('"')
@@ -1143,6 +1149,7 @@ class H3RefModCreateFromFolder(io.ComfyNode):
                     audio_budget_policy, max_total_tokens,
                     _auto_folder_description(sub, concept_type), subfolder,
                     save, save_layout, budget_policy, merge, motion_only, extraction_preset,
+                    include_images=include_images,
                 )
                 mods.extend(created)
             return io.NodeOutput(mods)
@@ -1155,6 +1162,7 @@ class H3RefModCreateFromFolder(io.ComfyNode):
             audio_max_seconds, audio_max_tokens,
             audio_budget_policy, max_total_tokens, description, subfolder,
             save, save_layout, budget_policy, merge, motion_only, extraction_preset,
+            include_images=include_images,
         )
         return io.NodeOutput(rows)
 

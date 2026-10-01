@@ -203,7 +203,8 @@ def load_refmods_from_file(path_no_ext: str, device: str = "cpu") -> List["H3Ref
         with safe_open(path_no_ext + ".safetensors", framework="pt", device=device) as f:
             for idx, member_meta in enumerate(refs):
                 latent = f.get_tensor(f"ref_{idx}").clone()
-                loaded.append(H3RefMod.from_metadata(member_meta, latent))
+                enc_frames = _read_encoder_images(member_meta, f.get_tensor)
+                loaded.append(H3RefMod.from_metadata(member_meta, latent, enc_frames=enc_frames))
         return loaded
 
     tensors = load_file(path_no_ext + ".safetensors", device=device)
@@ -217,7 +218,8 @@ def load_refmods_from_file(path_no_ext: str, device: str = "cpu") -> List["H3Ref
     visual_meta = dict(meta)
     visual_meta["ref_audio_t"] = 0
     visual_meta["audio_concept_type"] = ""
-    loaded = [H3RefMod.from_metadata(visual_meta, latent)]
+    enc_frames = _read_encoder_images(meta, tensors.__getitem__)
+    loaded = [H3RefMod.from_metadata(visual_meta, latent, enc_frames=enc_frames)]
     if audio_latent is not None and int(meta.get("ref_audio_t", 0) or 0) > 0:
         loaded.append(H3RefMod.from_metadata(_standalone_audio_member_meta(meta), audio_latent))
     return loaded
@@ -227,6 +229,8 @@ def save_refmod_bundle(path_no_ext: str, name: str, mods: List["H3RefMod"]) -> s
     unique = list({id(mod): mod for mod in mods}.values())
     if not unique:
         raise ValueError("RefMod bundle is empty.")
+    if sum(bool(mod.enc_frames) for mod in unique) > 1:
+        raise ValueError("Save RefMods with encoder pictures in separate files when more than one member has pictures.")
     metadata = {
         "_format_version": 5,
         "kind": "bundle",
@@ -237,6 +241,8 @@ def save_refmod_bundle(path_no_ext: str, name: str, mods: List["H3RefMod"]) -> s
         f"ref_{idx}": mod.latent.detach().cpu().contiguous().clone()
         for idx, mod in enumerate(unique)
     }
+    for mod in unique:
+        tensors.update({key: value.contiguous() for key, value in mod.enc_frames.items()})
     destination = path_no_ext + ".safetensors"
     directory = os.path.dirname(destination) or "."
     os.makedirs(directory, exist_ok=True)
@@ -249,6 +255,31 @@ def save_refmod_bundle(path_no_ext: str, name: str, mods: List["H3RefMod"]) -> s
         if os.path.exists(temporary):
             os.unlink(temporary)
     return destination
+
+
+def _read_encoder_images(meta, get_tensor):
+    record = meta.get("encoder_images") or {}
+    times = record.get("times", meta.get("enc_times", []))
+    prefix = record.get("prefix", "enc_")
+    return {f"enc_{index}": get_tensor(f"{prefix}{index}").detach().cpu().clone()
+            for index in range(len(times))}
+
+
+def pack_encoder_images(mod, frames, times, fps=24.0):
+    import io as bytes_io
+    from PIL import Image
+
+    if frames.shape[0] != len(times):
+        raise ValueError("Encoder picture count does not match its timestamps.")
+    packed = {}
+    for index, frame in enumerate(frames):
+        buffer = bytes_io.BytesIO()
+        pixels = (frame.detach().cpu().float().clamp(0, 1) * 255).round().to(torch.uint8).numpy()
+        Image.fromarray(pixels).save(buffer, "JPEG", quality=95)
+        packed[f"enc_{index}"] = torch.frombuffer(bytearray(buffer.getvalue()), dtype=torch.uint8)
+    mod.enc_frames = packed
+    mod.enc_times = list(times)
+    mod.enc_fps = float(fps)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Latent compression
@@ -709,6 +740,9 @@ class H3RefMod:
     audio_latent: Optional[torch.Tensor] = None
     ref_audio_t: int = 0
     sample_rate: int = 32000
+    enc_frames: Dict[str, torch.Tensor] = field(default_factory=dict)
+    enc_times: List[float] = field(default_factory=list)
+    enc_fps: float = 0.0
 
     def __post_init__(self):
         if self.kind == "audio":
@@ -851,6 +885,9 @@ class H3RefMod:
             meta["audio_concept_type"] = self.audio_concept_type
             meta["ref_audio_t"] = self.ref_audio_t
             meta["sample_rate"] = self.sample_rate
+        if self.enc_frames:
+            meta["enc_times"] = self.enc_times
+            meta["enc_fps"] = self.enc_fps
         return meta
 
     def save(self, path_no_ext: str) -> str:
@@ -858,6 +895,7 @@ class H3RefMod:
         os.makedirs(os.path.dirname(path_no_ext) or ".", exist_ok=True)
         meta = self.metadata()
         tensors = {"latent": self.latent.contiguous()}
+        tensors.update({key: value.contiguous() for key, value in self.enc_frames.items()})
         if self.audio_latent is not None and self.ref_audio_t > 0:
             tensors["audio_latent"] = self.audio_latent.contiguous()
         save_file(tensors, path_no_ext + ".safetensors",
@@ -871,9 +909,11 @@ class H3RefMod:
         latent: torch.Tensor,
         *,
         audio_latent: Optional[torch.Tensor] = None,
+        enc_frames: Optional[Dict[str, torch.Tensor]] = None,
     ) -> "H3RefMod":
         if not isinstance(meta, dict):
             raise ValueError("RefMod metadata must be a dict.")
+        record = meta.get("encoder_images") or {}
         return cls(
             name=meta.get("name", "refmod"),
             kind=meta.get("kind", "image"),
@@ -893,6 +933,9 @@ class H3RefMod:
             audio_latent=audio_latent,
             ref_audio_t=int(meta.get("ref_audio_t", 0) or 0) if audio_latent is not None else 0,
             sample_rate=int(meta.get("sample_rate", 32000) or 32000),
+            enc_frames=enc_frames or {},
+            enc_times=list(record.get("times", meta.get("enc_times", []))),
+            enc_fps=float(record.get("fps", meta.get("enc_fps", 0.0))),
         )
 
     @classmethod
@@ -910,5 +953,6 @@ class H3RefMod:
         all_tensors = load_file(path_no_ext + ".safetensors", device=device)
         latent = all_tensors["latent"].clone()
         audio_latent = all_tensors["audio_latent"].clone() if "audio_latent" in all_tensors else None
-        return cls.from_metadata(meta, latent, audio_latent=audio_latent)
+        enc_frames = _read_encoder_images(meta, all_tensors.__getitem__)
+        return cls.from_metadata(meta, latent, audio_latent=audio_latent, enc_frames=enc_frames)
 

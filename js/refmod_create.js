@@ -5,6 +5,76 @@ const TARGET_NODES = new Set([
 ]);
 
 const MIN_NODE_WIDTH = 320;
+const CREATE_FOLDER_INSTRUCTIONS = [
+    "Folder: absolute path or folder inside ComfyUI's input/.",
+    "Connect the H3 video VAE; audio VAE is optional.",
+    "use_subfolders creates one RefMod per immediate subfolder.",
+    "include_images stores grounding pictures; off by default.",
+    "Saves to models/refmods/ when save is enabled.",
+    "Or use directly as a mod, by connecting to mods output.",
+].join("\n");
+
+function addAspectRatioReminder(node) {
+    let tooltip = null;
+    let tooltipStyle = null;
+    function hideTooltip() {
+        tooltip?.remove();
+        tooltip = null;
+        tooltipStyle?.remove();
+        tooltipStyle = null;
+    }
+    const onDrawForeground = node.onDrawForeground;
+    node.onDrawForeground = function (context) {
+        const result = onDrawForeground?.apply(this, arguments);
+        if (!this.flags?.collapsed) {
+            context.save();
+            context.fillStyle = "#facc15";
+            context.font = "bold 18px sans-serif";
+            context.textAlign = "center";
+            context.textBaseline = "middle";
+            context.fillText("?", this.size[0] - 18, -15);
+            context.restore();
+        }
+        return result;
+    };
+    const onMouseMove = node.onMouseMove;
+    node.onMouseMove = function (event, position) {
+        const result = onMouseMove?.apply(this, arguments);
+        const overReminder = !this.flags?.collapsed && position &&
+            Math.abs(position[0] - (this.size[0] - 18)) <= 12 &&
+            Math.abs(position[1] + 15) <= 12;
+        if (!overReminder) {
+            hideTooltip();
+            return result;
+        }
+        if (!tooltip) {
+            tooltip = document.createElement("div");
+            tooltip.setAttribute("role", "tooltip");
+            const warning = document.createElement("strong");
+            warning.textContent = "Warning: images should all have the same aspect ratio within each dataset folder.";
+            warning.style.cssText = "display:block;margin-bottom:8px;color:#facc15;";
+            tooltip.append(warning, document.createTextNode(CREATE_FOLDER_INSTRUCTIONS));
+            tooltip.style.cssText = "position:fixed;z-index:10000;pointer-events:none;box-sizing:border-box;max-width:min(480px,calc(100vw - 16px));padding:12px 14px;border:1px solid #facc15;border-radius:4px;background:#252525;color:#fff;font-size:15px;line-height:1.45;white-space:pre-line;overflow-wrap:anywhere;";
+            tooltipStyle = document.createElement("style");
+            tooltipStyle.textContent = ".node-tooltip { display: none !important; }";
+            document.body.append(tooltip, tooltipStyle);
+        }
+        const bounds = tooltip.getBoundingClientRect();
+        tooltip.style.left = `${Math.max(8, Math.min(event.clientX + 12, window.innerWidth - bounds.width - 8))}px`;
+        tooltip.style.top = `${Math.max(8, Math.min(event.clientY + 12, window.innerHeight - bounds.height - 8))}px`;
+        return result;
+    };
+    const onMouseLeave = node.onMouseLeave;
+    node.onMouseLeave = function () {
+        hideTooltip();
+        return onMouseLeave?.apply(this, arguments);
+    };
+    const onRemoved = node.onRemoved;
+    node.onRemoved = function () {
+        hideTooltip();
+        return onRemoved?.apply(this, arguments);
+    };
+}
 
 const COMMON_PRESET_FIELDS = [
     "concept_type",
@@ -285,6 +355,7 @@ function enhanceCreateNode(node) {
         return originalOnResize?.apply(this, arguments);
     };
 
+    addAspectRatioReminder(node);
     moveWidgetAfter(node, "extraction_preset", "name");
     moveWidgetAfter(node, "advanced", "extraction_preset");
     moveWidgetAfter(node, "budget_policy", "max_total_tokens");
