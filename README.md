@@ -46,7 +46,7 @@ To have the Visual Picker pick up a preview image, place the image beside the Re
 
 ## RefMods to Video Node
 
-The grounded RefMods-to-Video node builds on work by [Adudeguyman's ComfyUI-Fantastic-MiniMaxH3-PromptBuilder](https://github.com/Adudeguyman/ComfyUI-Fantastic-MiniMaxH3-PromptBuilder). This also revisits earlier visual-grounding experiments this add-on add initially, which were perhaps set aside a little too quickly :)
+The grounded RefMods-to-Video node builds on work by [Adudeguyman's ComfyUI-Fantastic-MiniMaxH3-PromptBuilder](https://github.com/Adudeguyman/ComfyUI-Fantastic-MiniMaxH3-PromptBuilder). This also revisits earlier visual-grounding experiments this add-on had initially, which were perhaps set aside a little too quickly :)
 
 Unlike plain prompt encoding followed by RefMod Apply, this node gives the text encoder visual content behind labels such as `<Picture 1>` and `<Video 1>`, while supplying the corresponding latents to diffusion. This lets you refer to specific references in your prompt, but does not guarantee exclusive character or voice assignment.
 
