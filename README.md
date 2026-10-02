@@ -10,7 +10,7 @@ Please note, the `Create from Input` node was removed from this add-on. The same
 
 ## Latest Updates
 
-Video-file support has been removed from `Create H3 RefMod From Folder`. Video clips are not ideal for the simple, lightweight RefMods this add-on aims to create: around **six well-chosen reference images** are usually sufficient. Keep their aspect ratios consistent within each dataset folder. This is a recommendation, not a six-image limit; optional audio remains supported, and video files in the folder are ignored.
+Video-file support has been removed from `Create H3 RefMod From Folder`. Video clips are not ideal for the simple, lightweight RefMods this add-on aims to create: around **six to ten well-chosen reference images** are usually sufficient. Keep their aspect ratios consistent within each dataset folder. This is a recommendation, not an image limit; optional audio remains supported, and video files in the folder are ignored.
 
 ## Preview image naming
 
@@ -43,10 +43,10 @@ To have the Visual Picker pick up a preview image, place the image beside the Re
 
 - `Visual RefMod Picker` lets you browse using a **RefMods** browser. It supports legacy split RefMods and the newer single-file bundle format.
 - For legacy split RefMods, found pairs are grouped as one item in the picker. They are shown as one entry and loaded together, with separate video/audio weight controls. This uses a weight behavior: `0..1` is regular strength, values above 1 expand into repeated copies. For example, a weight of 2.7 would be the same as strength: 1.0, copies: 2.7.
-- `Create H3 RefMod From Folder` scans a folder of reference images and optional audio, and saves in the bundle format by default. Around six images are usually sufficient. It can also batch-create RefMods for all subfolders found. The optional `include_images` switch adds reconstructed encoder pictures to visual RefMods while keeping the existing latent format compatible; it is off by default.
+- `Create H3 RefMod From Folder` scans a folder of reference images and optional audio, and saves in the bundle format by default. Around six to ten images can be sufficient. It can also batch-create RefMods for all subfolders found. The optional `include_images` switch adds reconstructed encoder pictures to visual RefMods while keeping the existing latent format compatible; it is off by default.
 - `Load RefMod Simple` is a singular loader. It supports standalone visual/audio RefMods and the new bundle format, while still using the same weight behavior as the Picker.
+- `MiniMax H3 RefMods to Video` grounds prompt labels with RefMod pictures and applies their visual/audio latents, returning positive conditioning, an empty AV latent, and a reference map. Optional ordinary media can be added through `Collect H3 References`. It replaced minimax's Reference to Video node. It takes in mods as an input, bypassing the need to apply the RefMods using an apply node.
 - `Apply H3 RefMod Simple` is a streamlined version of the Apply H3 RefMod, without the extra controls.
-- The optional standalone `generate_video_thumbnails.py` tool generates thumbnails from `.mp4` files. It is not a node and remains available despite the removal of video-file creation support. It can be found in `tools` and grabs a random frame between 25% and 75% for each clip found in a folder. Only this tool requires the external `ffmpeg` and `ffprobe` executables.
 
 ## RefMods to Video Node
 
