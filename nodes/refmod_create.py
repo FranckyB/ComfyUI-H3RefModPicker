@@ -18,8 +18,7 @@ import folder_paths
 from comfy_api.latest import io
 
 from ..py.refmod_common import (
-    list_media_files,
-    load_video_file,
+    list_image_files,
     refmods_dir,
 )
 from ..py.refmod_core import (
@@ -81,13 +80,6 @@ def _resize_ref(image, short_edge: int, canvas=None):
             f"in comfy.utils.common_upscale for this input, not in RefMod's "
             f"own math.")
     return samples.movedim(1, -1)
-
-
-def _snap_to_causal_grid(n_frames: int) -> int:
-    """Round a video frame count down to the nearest valid ``4k + 1``."""
-    if n_frames <= 1:
-        return 1
-    return ((n_frames - 1) // 4) * 4 + 1
 
 
 def _ensure_min_size(image, floor: int = 320):
@@ -153,7 +145,7 @@ def _normalize_ref(src, label: str = "reference") -> torch.Tensor:
         if src.shape[0] == 0:
             raise ValueError(
                 f"H3RefModExtract: {label} has no frames "
-                f"(T=0) — check the source image/video.")
+                f"(T=0) — check the source image.")
         src = src[0] if src.shape[0] == 1 else src.reshape(-1, *src.shape[2:])
     if src.dim() == 3:
         src = src.unsqueeze(0)
@@ -166,11 +158,11 @@ def _normalize_ref(src, label: str = "reference") -> torch.Tensor:
     if src.shape[0] <= 0:
         raise ValueError(
             f"H3RefModExtract: {label} has no frames (T={src.shape[0]}) "
-            f"— check the source image/video.")
+            f"— check the source image.")
     if src.shape[1] <= 0 or src.shape[2] <= 0:
         raise ValueError(
             f"H3RefModExtract: {label} has an empty frame "
-            f"({src.shape[1]}x{src.shape[2]}) — check the source image/video.")
+            f"({src.shape[1]}x{src.shape[2]}) — check the source image.")
     return src
 
 
@@ -224,12 +216,12 @@ def _folder_refmod_name(folder: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Folder scanning (images / videos / audio)
+# Folder scanning (images / audio)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _scan_folder(folder: str) -> "tuple[List[str], List[str], List[str]]":
-    """(images, videos, audios) directly under ``folder``, sorted by name."""
-    images, videos = list_media_files(folder)
+def _scan_folder(folder: str) -> "tuple[List[str], List[str]]":
+    """(images, audios) directly under ``folder``, sorted by name."""
+    images = list_image_files(folder)
     audios = []
     if os.path.isdir(folder):
         for fn in sorted(os.listdir(folder)):
@@ -237,12 +229,12 @@ def _scan_folder(folder: str) -> "tuple[List[str], List[str], List[str]]":
                 p = os.path.join(folder, fn)
                 if os.path.isfile(p):
                     audios.append(p)
-    if not images and not videos and not audios:
+    if not images and not audios:
         print(
-            f"[H3RefModCreateFromFolder] scan: '{folder}' contains no supported image, video, or audio files "
+            f"[H3RefModCreateFromFolder] scan: '{folder}' contains no supported image or audio files "
             "at the top level."
         )
-    return images, videos, audios
+    return images, audios
 
 
 def _image_size(path: str) -> "tuple[int, int]":
@@ -411,7 +403,7 @@ def _apply_extraction_preset(mode, ref_resolution, pool_h, pool_w, identity,
     elif extraction_preset == "motion_sequence":
         concept_type, audio_concept_type = "pose_motion", "voice"
         mode, pool_h, pool_w, merge, motion_only = "training", 16, 16, False, False
-        preset_replaced = "concept_type=pose_motion, audio_concept_type=voice, mode=Compressed Reference, pool_h=16, pool_w=16, merge=False, motion_only=False (frame limit and Refinement Steps preserved)"
+        preset_replaced = "concept_type=pose_motion, audio_concept_type=voice, mode=Compressed Reference, pool_h=16, pool_w=16, merge=False (Refinement Steps preserved)"
     elif extraction_preset != "manual":
         raise ValueError("Unknown extraction preset.")
     mode = normalize_mode(mode)
@@ -653,19 +645,21 @@ def _create_mod_from_folder(
     )
     description = (description or "").strip() or _auto_folder_description(folder, concept_type)
 
-    images, videos, audios = _scan_folder(folder)
-    has_visual = bool(images or videos)
+    images, audios = _scan_folder(folder)
+    has_visual = bool(images)
     has_audio_files = bool(audios)
     if not has_visual and not has_audio_files:
         raise ValueError(
-            f"H3RefModCreateFromFolder: no images, videos, or audio found in '{folder}'. "
-            "Extraction needs at least one usable reference file.")
+                        f"H3RefModCreateFromFolder: no images or audio found in '{folder}'. "
+                        "Video files are not supported. Use around six reference images instead.")
     print(f"[H3RefModCreateFromFolder] {folder}: {len(images)} image(s), "
-          f"{len(videos)} video(s), {len(audios)} audio file(s)")
+                    f"{len(audios)} audio file(s)")
 
     ignored = []
     if has_visual and mode == "encode":
-        ignored.append("pool_h, pool_w, Refinement Steps, merge, motion_only (Full Reference)")
+        ignored.append("pool_h, pool_w, Refinement Steps, merge (Full Reference)")
+    if motion_only:
+        ignored.append("motion_only (video-file support removed)")
     if has_visual and max_tokens == 0:
         ignored.append("budget_policy (max_tokens=0)")
     if ignored:
@@ -715,27 +709,20 @@ def _create_mod_from_folder(
         if has_audio_files and audio_vae is None:
             raise ValueError(
                 f"H3RefModCreateFromFolder: '{folder}' contains only audio files, but no audio_vae is connected. "
-                "Connect the MiniMax H3 audio VAE or add image/video references."
+                "Connect the MiniMax H3 audio VAE or add reference images."
             )
         raise ValueError(
             f"H3RefModCreateFromFolder: '{folder}' did not produce any usable visual or audio references."
         )
 
     # ── load visual refs as tensors ──────────────────────────────────
-    sources = []  # (tensor [T,H,W,3], is_video, mask [1,H,W] | None)
+    sources = []
     for p in images:
         image, mask = _load_image_and_alpha_mask_file(p, max_edge=ref_resolution * 2)
-        sources.append((image, False, mask))
-    for p in videos:
-        sources.append((load_video_file(p, max_frames=max_frames,
-                                        max_edge=ref_resolution * 2), True, None))
+        sources.append((image, mask))
     if merge and mode != "training":
         print("[H3RefModCreateFromFolder] warning: 'merge' only applies to "
               "training mode — stacking the refs as usual for mode='encode'.")
-    if motion_only and mode != "training":
-        print("[H3RefModCreateFromFolder] warning: 'motion_only' only applies to "
-              "training mode — extracting the full appearance for mode='encode'.")
-        motion_only = False
 
     # shared spatial canvas (encode mode) / pool grid (training mode)
     canvas = None
@@ -757,40 +744,19 @@ def _create_mod_from_folder(
     # ── encode each source ───────────────────────────────────────────
     frames = []
     source_shapes = []
-    n_img = n_vid = 0
+    n_img = 0
     n_refs = len(sources)
-    motion_applied = False
-    motion_warned = False
     mask_applied = False
     merge_refs = [] if (merge and mode == "training" and n_refs > 1) else None
     pbar = comfy.utils.ProgressBar(n_refs)
-    for idx, (src, is_video, source_mask) in enumerate(sources):
-        label = f"ref {idx + 1}/{n_refs} ({'video' if is_video else 'image'})"
-        if not is_video:
-            src = src[:1]  # pin stills to a single frame
+    for idx, (src, source_mask) in enumerate(sources):
+        label = f"ref {idx + 1}/{n_refs} (image)"
+        src = src[:1]
         if mode == "encode":
-            if is_video and latent_frames < src.shape[0]:
-                sample_idx = torch.linspace(0, src.shape[0] - 1, latent_frames).round().long()
-                src = src[sample_idx]
             src = _resize_ref(src, ref_resolution, canvas)
         else:
             src = _resize_ref(src, ref_resolution, None)
-        if motion_only and is_video and src.shape[0] > 1:
-            diffs = (src[1:] - src[:-1]).abs()
-            peak = diffs.max()
-            if peak > 1e-6:
-                diffs = diffs / peak
-            src = diffs
-            motion_applied = True
-            print(f"[H3RefModCreateFromFolder] {label}: motion_only — encoded temporal differences instead of the frames")
-        elif motion_only and not is_video and not motion_warned:
-            print("[H3RefModCreateFromFolder] warning: motion_only needs video refs — a still has no motion, keeping its appearance.")
-            motion_warned = True
         src = _ensure_min_size(src)
-        if is_video and src.shape[0] > 1:
-            valid_t = _snap_to_causal_grid(src.shape[0])
-            if valid_t != src.shape[0]:
-                src = src[:valid_t]
         mask_px = None
         if source_mask is not None:
             mask_px = _resize_mask(source_mask, src.shape[1], src.shape[2])
@@ -808,8 +774,7 @@ def _create_mod_from_folder(
         if mode == "encode":
             pooled = z.to(torch.float16)
         else:
-            pool_t = min(latent_frames, z.shape[2]) if is_video else 1
-            pooled = pool_latent(z, pool_t, gh, gw).to(torch.float16)
+            pooled = pool_latent(z, 1, gh, gw).to(torch.float16)
             if merge_refs is not None:
                 merge_refs.append((pooled.cpu(), z.float().cpu()))
             elif identity > 0:
@@ -817,8 +782,7 @@ def _create_mod_from_folder(
                                          progress_every=100)
         if merge_refs is None:
             frames.append(pooled)
-        n_vid += 1 if is_video else 0
-        n_img += 0 if is_video else 1
+        n_img += 1
         print(f"[H3RefModCreateFromFolder] {label}: encoded {tuple(pooled.shape)}")
         pbar.update_absolute(idx + 1)
 
@@ -857,7 +821,7 @@ def _create_mod_from_folder(
         elif len(frames) > 1:
             source = "stack"
         else:
-            source = "video" if n_vid else "image"
+            source = "image"
 
     out_dir = _resolve_output_dir(subfolder)
     requested_base = _base_refmod_name(name)
@@ -902,9 +866,8 @@ def _create_mod_from_folder(
             pool=(f"full-res {px_w}x{px_h}px (short-edge cap {ref_resolution}px)"
                   if mode == "encode" else f"{total_t}x{gh}x{gw}"),
             optimize_steps=int(identity) if mode == "training" else 0,
-            tags=[f"{n_img} img, {n_vid} vid"]
+                 tags=[f"{n_img} img"]
                    + ([f"merged {merged_n} refs"] if merged_n else [])
-                   + (["motion_only"] if motion_applied else [])
                    + ([f"masked (bg_retention={background_retention})"] if mask_applied else [])
                    + ([f"x{multiplier} repeat"] if multiplier > 1 else [])
                    + ([f"paired {audio_name}"] if include_audio else []),
@@ -953,7 +916,7 @@ def _create_mod_from_folder(
 
 
 class H3RefModCreateFromFolder(io.ComfyNode):
-    """Create a RefMod from every image/video/audio in a folder.
+    """Create a RefMod from reference images and optional audio in a folder.
 
     Scans a dataset folder, encodes the media with the connected H3 VAEs,
     and saves a visual RefMod.
@@ -976,14 +939,14 @@ class H3RefModCreateFromFolder(io.ComfyNode):
             node_id="H3RefModCreateFromFolder",
             display_name="Create H3 RefMod From Folder",
             category="H3RefModPicker",
-            description="Create RefMods from a folder of images, video, and optional audio. "
+            description="Create RefMods from reference images and optional audio. Around six images usually suffice. "
                         "Saves to models/refmods/ by default.",
             inputs=[
                 io.String.Input("folder", default="",
-                    tooltip="Dataset folder with reference images/videos/audio. REQUIRED — "
+                    tooltip="Dataset folder with reference images and optional audio. REQUIRED — "
                             "an absolute path, or a folder name inside ComfyUI's input/ "
                             "directory. The node will NOT run if left empty. "
-                            "! Use images with the same aspect ratio whenever possible."),
+                            "Use around six images with the same aspect ratio whenever possible. Video files are ignored."),
                 io.Boolean.Input("use_subfolders", default=False,
                     label_on="subfolders", label_off="single folder",
                     tooltip="When ON, the folder input is treated as a parent directory: "
@@ -1002,7 +965,7 @@ class H3RefModCreateFromFolder(io.ComfyNode):
                 io.Combo.Input("extraction_preset", options=["manual", "identity_encode", "style_experimental", "motion_sequence"], default="identity_encode",
                     tooltip="manual preserves controls. identity_encode: identity + voice, Full Reference, resolution=1024, steps=0. "
                             "style_experimental: style + voice, Compressed Reference, 8x8 pool, 150 steps. "
-                            "motion_sequence: pose_motion + voice, Compressed Reference, 16x16 pool; preserves frame limit and Refinement Steps."),
+                            "motion_sequence: pose references from images + voice, Compressed Reference, 16x16 pool; preserves Refinement Steps."),
                 io.Boolean.Input("advanced", default=False,
                     label_on="advanced", label_off="simple",
                     tooltip="Preset display mode. simple hides most preset-managed controls; advanced shows the fuller control set while preserving the same preset values."),
@@ -1034,10 +997,6 @@ class H3RefModCreateFromFolder(io.ComfyNode):
                             "to the first source's aspect ratio so a portrait subject isn't squished."),
                 io.Int.Input("pool_w", default=16, min=2, max=64, step=2,
                     tooltip="Compressed Reference mode: pooled latent width (long edge if the source is wider than tall)."),
-                io.Int.Input("latent_frames", default=16, min=1, max=4800, step=1,
-                    tooltip="Per-video temporal limit. Full Reference samples up to this many frames "
-                            "before VAE encode; Compressed Reference pools up to this many latent frames. "
-                            "Images always use 1."),
                 io.Int.Input("max_tokens", default=8192, min=0, max=65536, step=512,
                     tooltip="Hard cap on total injected tokens (0 = no cap). Near-duplicate "
                             "frames dropped first, then resampled to fit."),
@@ -1047,19 +1006,13 @@ class H3RefModCreateFromFolder(io.ComfyNode):
                     label_on="merge", label_off="stack",
                     tooltip="Compressed Reference only: optimize one shared consensus latent against "
                             "all refs instead of stacking each ref separately."),
-                io.Boolean.Input("motion_only", default=False,
-                    label_on="motion", label_off="full",
-                    tooltip="Compressed Reference only: video refs are converted to temporal differences "
-                            "before encoding, so the mod carries where/how things move instead of appearance."),
                 io.Int.Input("multiplier", default=1, min=1, max=10, step=1,
-                    tooltip="Repeat the extracted latent along time so a short clip is not drowned out by "
+                    tooltip="Repeat the extracted latent along time so a short reference is not drowned out by "
                             "the main video's token budget. 1 = no repeat."),
-                io.Int.Input("max_frames", default=240, min=2, max=4800, step=1,
-                    tooltip="Video decode cap while scanning folder clips before later frame sampling/pooling."),
                 io.Float.Input("background_retention", default=0.0, min=0.0, max=1.0, step=0.05,
                     tooltip="Only used for still images in the folder that carry an embedded alpha mask. "
                             "Outside the masked subject, 0 collapses the latent toward a blurred copy of "
-                            "itself, 1 keeps the full background. Videos and opaque images ignore this."),
+                            "itself, 1 keeps the full background. Opaque images ignore this."),
                 io.Float.Input("audio_max_seconds", default=30.0, min=0.025, max=600.0,
                     tooltip="Combined audio reference length cap across folder audio files before encoding. "
                             "Longer audio creates more tokens; 30 seconds matches the upstream master default."),
