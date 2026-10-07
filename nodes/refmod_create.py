@@ -418,30 +418,44 @@ def _apply_extraction_preset(mode, ref_resolution, pool_h, pool_w, identity,
 
 def _load_audio_waveform(path: str) -> "tuple[torch.Tensor, int]":
     """Load an audio file -> (waveform [C, L] float32, sample_rate)."""
+    errors = []
     try:
         import torchaudio
         waveform, sr = torchaudio.load(path)
         if waveform.dim() == 1:
             waveform = waveform.unsqueeze(0)
         return waveform.float(), sr
-    except Exception:
-        pass
+    except Exception as exc:
+        errors.append(f"torchaudio: {exc}")
     try:
         import soundfile as sf
         data, sr = sf.read(path, always_2d=True)  # [L, C]
         return torch.from_numpy(data.T).float(), sr
-    except Exception:
-        pass
-    from scipy.io import wavfile
-    sr, data = wavfile.read(path)
-    t = torch.from_numpy(data).float()
-    if t.dim() == 1:
-        t = t.unsqueeze(0)
-    else:
-        t = t.T
-    if data.dtype.kind in ("i", "u"):
-        t = t / float(2 ** (8 * data.dtype.itemsize - 1))
-    return t, sr
+    except Exception as exc:
+        errors.append(f"soundfile: {exc}")
+    try:
+        from comfy_extras.nodes_audio import load
+        return load(path)
+    except Exception as exc:
+        errors.append(f"ComfyUI audio decoder: {exc}")
+    if os.path.splitext(path)[1].lower() == ".wav":
+        try:
+            from scipy.io import wavfile
+            sr, data = wavfile.read(path)
+            waveform = torch.from_numpy(data).float()
+            if waveform.dim() == 1:
+                waveform = waveform.unsqueeze(0)
+            else:
+                waveform = waveform.T
+            if data.dtype.kind in ("i", "u"):
+                waveform = waveform / float(2 ** (8 * data.dtype.itemsize - 1))
+            return waveform, sr
+        except Exception as exc:
+            errors.append(f"scipy WAV reader: {exc}")
+    raise RuntimeError(
+        f"Could not decode audio file {path!r}. Try converting it to PCM WAV. "
+        + " | ".join(errors)
+    )
 
 
 def _resample(waveform: torch.Tensor, sr: int, target_sr: int) -> torch.Tensor:
