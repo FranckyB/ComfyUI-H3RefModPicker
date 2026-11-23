@@ -8,6 +8,7 @@ import server
 from ..py.refmod_browser import (
     PREVIEW_EXTS,
     browser_root,
+    file_browser_listing,
     list_browser_dir,
     paired_mod_path,
     safe_file_path,
@@ -144,6 +145,17 @@ async def refmod_browser_list(request):
     try:
         data = list_browser_dir(request.query.get("path", "").strip())
         return server.web.json_response({"ok": True, **data})
+    except ValueError as exc:
+        return server.web.json_response({"ok": False, "error": str(exc)}, status=404)
+    except Exception as exc:
+        return server.web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+
+@server.PromptServer.instance.routes.get("/h3refmods/path-browser/list")
+async def refmod_file_browser_list(request):
+    """The listing for the shared file browser (js/file_browser.js)."""
+    try:
+        return server.web.json_response(file_browser_listing(request.query.get("path", "").strip()))
     except ValueError as exc:
         return server.web.json_response({"ok": False, "error": str(exc)}, status=404)
     except Exception as exc:

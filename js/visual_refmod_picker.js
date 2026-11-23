@@ -1,5 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { createFileBrowserModal } from "./file_browser.js";
 
 const PLACEHOLDER_IMAGE_PATH = new URL("./placeholder.png", import.meta.url).href;
 const DEFAULT_PICKER_NODE_SIZE = [240, 480];
@@ -153,11 +154,6 @@ function relativePathFromRoot(path, root) {
     return normalizedPath;
 }
 
-function displayPathFromRoot(path, root) {
-    const relativePath = relativePathFromRoot(path, root);
-    return relativePath || "/";
-}
-
 function resolvePathFromRoot(path, root) {
     const normalizedPath = normalizeFsPath(path);
     const normalizedRoot = normalizeFsPath(root).replace(/\/+$/, "");
@@ -229,393 +225,6 @@ async function listBrowserFolder(path) {
         throw new Error(msg);
     }
     return await resp.json();
-}
-
-function makeButton(label, onClick) {
-    const button = document.createElement("button");
-    button.textContent = label;
-    button.style.cssText = `
-        background: #2e3b4a;
-        border: 1px solid rgba(255,255,255,0.2);
-        border-radius: 6px;
-        color: #dce6f2;
-        padding: 5px 12px;
-        cursor: pointer;
-        font-size: 12px;
-    `;
-    button.onmouseenter = () => {
-        button.style.background = "#3a4a5c";
-    };
-    button.onmouseleave = () => {
-        button.style.background = "#2e3b4a";
-    };
-    button.addEventListener("click", onClick);
-    return button;
-}
-
-function createRefModBrowserModal(initialPath, onSelect) {
-    const overlay = document.createElement("div");
-    overlay.style.cssText = `
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.8);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        z-index: 10000;
-    `;
-
-    const modal = document.createElement("div");
-    modal.style.cssText = `
-        background: rgba(40, 44, 52, 0.98);
-        border: 1px solid rgba(255,255,255,0.1);
-        border-radius: 6px;
-        width: 95%;
-        max-width: 1304px;
-        height: 95%;
-        max-height: 1185px;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-        box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
-    `;
-
-    const header = document.createElement("div");
-    header.style.cssText = `
-        padding: 15px 20px;
-        border-bottom: 1px solid rgba(255,255,255,0.1);
-    `;
-
-    const topRow = document.createElement("div");
-    topRow.style.cssText = "display: flex; justify-content: space-between; align-items: center;";
-
-    const title = document.createElement("div");
-    title.textContent = "Select RefMod";
-    title.style.cssText = "margin: 0; color: #aaa; font-size: 1.17em; font-weight: 600;";
-
-    const closeButton = document.createElement("button");
-    closeButton.textContent = "×";
-    closeButton.style.cssText = `
-        background: none;
-        border: none;
-        color: #aaa;
-        font-size: 24px;
-        cursor: pointer;
-        padding: 0;
-        width: 30px;
-        height: 30px;
-    `;
-    closeButton.onclick = () => overlay.remove();
-
-    const upButton = makeButton("Up", () => {
-        if (state.parentPath) void loadFolder(state.parentPath);
-    });
-
-    topRow.append(title, closeButton);
-    header.append(topRow);
-
-    const filterBar = document.createElement("div");
-    filterBar.style.cssText = `
-        padding: 10px 20px;
-        border-bottom: 1px solid rgba(255,255,255,0.1);
-        display: flex;
-        align-items: center;
-        gap: 10px;
-    `;
-
-    filterBar.appendChild(upButton);
-
-    const searchWrap = document.createElement("div");
-    searchWrap.style.cssText = "position: relative; flex: 1; display: flex; align-items: center;";
-
-    const searchInput = document.createElement("input");
-    searchInput.type = "text";
-    searchInput.placeholder = "Search files...";
-    searchInput.style.cssText = `
-        flex: 1;
-        padding: 8px 36px 8px 12px;
-        background: rgba(45, 55, 72, 0.7);
-        border: 1px solid rgba(226, 232, 240, 0.2);
-        border-radius: 6px;
-        color: #ccc;
-    `;
-
-    const clearSearchButton = document.createElement("button");
-    clearSearchButton.type = "button";
-    clearSearchButton.textContent = "×";
-    clearSearchButton.title = "Clear search";
-    clearSearchButton.style.cssText = `
-        position: absolute;
-        right: 8px;
-        top: 50%;
-        transform: translateY(-50%);
-        width: 20px;
-        height: 20px;
-        padding: 0;
-        border: none;
-        background: transparent;
-        color: #aaa;
-        cursor: pointer;
-        font-size: 16px;
-        line-height: 1;
-        display: none;
-    `;
-
-    searchWrap.append(searchInput, clearSearchButton);
-    filterBar.appendChild(searchWrap);
-
-    const body = document.createElement("div");
-    body.style.cssText = `
-        flex: 1;
-        overflow-y: auto;
-        padding: 20px;
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-        gap: 15px;
-        align-content: start;
-    `;
-
-    const status = document.createElement("div");
-    status.style.cssText = "padding: 10px 20px; border-bottom: 1px solid rgba(255,255,255,0.1); display: flex; gap: 12px; align-items: center; font-size: 12px; color: #888;";
-
-    const countsLabel = document.createElement("div");
-    countsLabel.style.cssText = "white-space: nowrap;";
-
-    const pathLabel = document.createElement("div");
-    pathLabel.style.cssText = "min-width: 0; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;";
-
-    status.append(countsLabel, pathLabel);
-
-    modal.append(header, filterBar, status, body);
-    overlay.appendChild(modal);
-    document.body.appendChild(overlay);
-
-    overlay.addEventListener("click", (event) => {
-        if (event.target === overlay) overlay.remove();
-    });
-
-    const state = {
-        root: "",
-        currentPath: "",
-        parentPath: null,
-        items: [],
-    };
-
-    function setCardSelected(card, selected) {
-        if (!card) return;
-        card.dataset.selected = selected ? "1" : "0";
-        card.style.borderColor = selected ? "rgba(255, 255, 255, 0.95)" : "rgba(226, 232, 240, 0.2)";
-        card.style.background = selected ? "rgba(50, 112, 163, 0.28)" : "rgba(45, 55, 72, 0.7)";
-        card.style.transform = "translateY(0)";
-    }
-
-    function updateVisibleItems() {
-        const search = String(searchInput.value || "").trim().toLowerCase();
-        for (const entry of state.items) {
-            const haystack = `${entry.kind === "dir" ? entry.data.name : entry.data.name}`.toLowerCase();
-            const visible = !search || haystack.includes(search);
-            entry.element.style.display = visible ? "flex" : "none";
-        }
-    }
-
-    function updateSearchClearButton() {
-        clearSearchButton.style.display = searchInput.value ? "block" : "none";
-    }
-
-    function folderCard(entry) {
-        const card = document.createElement("div");
-        card.className = "folder-item";
-        card.style.cssText = `
-            background: rgba(45, 55, 72, 0.7);
-            border: 1px solid rgba(226, 232, 240, 0.2);
-            border-radius: 6px;
-            padding: 8px;
-            cursor: pointer;
-            transition: all 0.15s ease;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        `;
-        const icon = document.createElement("div");
-        icon.style.cssText = `
-            width: 100%;
-            height: 250px;
-            background: rgba(0, 0, 0, 0.5);
-            border-radius: 4px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 64px;
-        `;
-        icon.textContent = "📁";
-        const label = document.createElement("div");
-        label.textContent = entry.name;
-        label.style.cssText = `
-            font-size: 12px;
-            color: #ccc;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            text-align: center;
-        `;
-        label.title = entry.name;
-        card.append(icon, label);
-        card.onmouseenter = () => {
-            card.style.borderColor = "rgba(66, 153, 225, 0.9)";
-            card.style.transform = "translateY(-2px)";
-            card.style.background = "rgba(50, 112, 163, 0.5)";
-        };
-        card.onmouseleave = () => {
-            card.style.borderColor = "rgba(226, 232, 240, 0.2)";
-            card.style.transform = "translateY(0)";
-            card.style.background = "rgba(45, 55, 72, 0.7)";
-        };
-        card.addEventListener("click", () => void loadFolder(entry.path));
-        return card;
-    }
-
-    function modCard(entry) {
-        const card = document.createElement("div");
-        card.className = "thumbnail-item";
-        card.style.cssText = `
-            background: rgba(45, 55, 72, 0.7);
-            border: 1px solid rgba(226, 232, 240, 0.2);
-            border-radius: 6px;
-            padding: 8px;
-            cursor: pointer;
-            transition: all 0.15s ease;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        `;
-        const imageBox = document.createElement("div");
-        imageBox.style.cssText = `
-            width: 100%;
-            height: 250px;
-            background: rgba(0, 0, 0, 0.5);
-            border-radius: 4px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            overflow: hidden;
-            position: relative;
-        `;
-        const img = document.createElement("img");
-        installPreviewFallback(img);
-        img.src = entry.preview_path ? `${buildPreviewUrl(entry.preview_path)}&${Date.now()}` : PLACEHOLDER_IMAGE_PATH;
-        img.style.cssText = `
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-            object-position: center center;
-            display: block;
-            background: rgba(0, 0, 0, 0.5);
-        `;
-        imageBox.appendChild(img);
-        const title = document.createElement("div");
-        title.textContent = entryDisplayName(entry);
-        title.style.cssText = `
-            font-size: 12px;
-            color: #ccc;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            text-align: center;
-        `;
-        title.title = entryDisplayName(entry);
-        card.append(imageBox, title);
-        const selectedPath = state.selectedPath;
-        setCardSelected(card, !!selectedPath && pathsEqual(selectedPath, entry.path));
-        card.onmouseenter = () => {
-            if (card.dataset.selected === "1") return;
-            card.style.borderColor = "rgba(66, 153, 225, 0.9)";
-            card.style.transform = "translateY(-2px)";
-            card.style.background = "rgba(50, 112, 163, 0.5)";
-        };
-        card.onmouseleave = () => {
-            if (card.dataset.selected === "1") {
-                setCardSelected(card, true);
-                return;
-            }
-            card.style.borderColor = "rgba(226, 232, 240, 0.2)";
-            card.style.transform = "translateY(0)";
-            card.style.background = "rgba(45, 55, 72, 0.7)";
-        };
-        card.addEventListener("click", () => {
-            onSelect(entry);
-            overlay.remove();
-        });
-        return card;
-    }
-
-    async function loadFolder(path) {
-        const requestedPath = path || state.root;
-        try {
-            countsLabel.textContent = "Loading...";
-            pathLabel.textContent = "";
-            body.replaceChildren();
-            state.items = [];
-            const data = await listBrowserFolder(requestedPath);
-            state.root = data.root || state.root;
-            state.currentPath = data.current_path || requestedPath || state.currentPath;
-            state.parentPath = data.parent_path || null;
-            state.selectedPath = null;
-            pathLabel.textContent = displayPathFromRoot(
-                state.currentPath || state.root,
-                state.root
-            );
-            upButton.disabled = !state.parentPath;
-            countsLabel.textContent = `${(data.dirs || []).length} folder(s), ${(data.mods || []).length} RefMod(s)`;
-
-            for (const dir of data.dirs || []) {
-                const element = folderCard(dir);
-                state.items.push({ kind: "dir", data: dir, element });
-                body.appendChild(element);
-            }
-            for (const mod of data.mods || []) {
-                const element = modCard(mod);
-                state.items.push({ kind: "mod", data: mod, element });
-                body.appendChild(element);
-            }
-            if (!body.childNodes.length) {
-                const empty = document.createElement("div");
-                empty.textContent = "No RefMods or subfolders found here.";
-                empty.style.cssText = "text-align: center; padding: 40px; color: #aaa;";
-                body.appendChild(empty);
-            }
-            updateVisibleItems();
-        } catch (err) {
-            const rootPath = state.root || await getRefModsRoot();
-            if (rootPath && requestedPath && !pathsEqual(requestedPath, rootPath)) {
-                console.warn("[VisualRefModPicker] Browser folder missing, falling back to refmods root:", requestedPath, err);
-                state.root = rootPath;
-                await loadFolder(rootPath);
-                return;
-            }
-            countsLabel.textContent = err?.message || "Could not load RefMods.";
-            pathLabel.textContent = "";
-        }
-    }
-
-    searchInput.addEventListener("input", () => {
-        updateSearchClearButton();
-        updateVisibleItems();
-    });
-
-    clearSearchButton.addEventListener("click", () => {
-        searchInput.value = "";
-        updateSearchClearButton();
-        updateVisibleItems();
-        searchInput.focus();
-    });
-
-    updateSearchClearButton();
-
-    void (async () => {
-        const root = await getRefModsRoot();
-        state.root = root;
-        await loadFolder(initialPath || root);
-    })();
 }
 
 app.registerExtension({
@@ -999,12 +608,22 @@ app.registerExtension({
                     node.properties?._vrpModDir || dirnameForPath(current),
                     node._vrpRoot || root
                 ) || root;
-                createRefModBrowserModal(initialPath, async (selected) => {
+                // The shared file browser (as in FBnodes), kept to models/refmods.
+                createFileBrowserModal("", async (absPath) => {
                     node.properties._vrpModDir = dirnameForPath(
-                        relativePathFromRoot(selected.path, node._vrpRoot || root)
+                        relativePathFromRoot(absPath, node._vrpRoot || root)
                     );
-                    setSelection(selected);
-                    await refreshPickerOptions(node.properties._vrpModDir, selected.path);
+                    const entry = await refreshPickerOptions(node.properties._vrpModDir, absPath);
+                    setSelection(entry ?? { path: absPath });
+                }, "input", {
+                    initialPath,
+                    selectedAbsPath: current ? resolvePathFromRoot(current, node._vrpRoot || root) : "",
+                    places: [{ label: "RefMods", title: "The models/refmods folder", path: getRefModsRoot }],
+                    custom: null,
+                    canDelete: false,
+                    allowedTypes: ["other"],
+                    filterTypeOptions: ["other"],
+                    defaultFilter: "other",
                 });
             };
 

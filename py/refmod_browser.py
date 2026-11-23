@@ -251,3 +251,35 @@ def list_browser_dir(path: str = "") -> Dict:
         "dirs": dirs,
         "mods": mods,
     }
+
+def file_browser_listing(path: str = "") -> Dict:
+    """``list_browser_dir`` in the shape the shared file browser reads (the
+    same browser as FBnodes): RefMods are its files, each with its preview
+    picture and what it carries as details. Never outside models/refmods."""
+    data = list_browser_dir(path)
+    files = []
+    for mod in data["mods"]:
+        carries = " + ".join(part for part, on in (("Visual", mod["has_visual"]), ("Audio", mod["has_audio"])) if on)
+        concept = mod["concept_type"] if mod["concept_type"] != "generic" else ""
+        try:
+            stat = os.stat(mod["path"])
+            size, modified = stat.st_size, stat.st_mtime
+        except OSError:
+            size = modified = None
+        files.append({
+            "name": mod["name"],
+            "path": mod["path"],
+            "preview": mod["preview_path"],
+            "details": " · ".join(part for part in (carries, concept) if part) or mod["kind"],
+            "size": size,
+            "modified": modified,
+        })
+    return {
+        "ok": True,
+        "mode": "browse",
+        "current_path": data["current_path"],
+        "parent_path": data["parent_path"],
+        "roots": [data["root"]],
+        "dirs": data["dirs"],
+        "files": files,
+    }
